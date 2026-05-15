@@ -18,7 +18,6 @@ classifiers = [
     "Topic :: Software Development :: Libraries :: Python Modules",
     "Typing :: Typed",
 ]
-# Core library dependencies only
 dependencies = [
     "httpx>=0.27.0",
     "pydantic>=2.5.0",
@@ -48,6 +47,8 @@ all = [
     "platformdirs>=4.0.0",
     "textual>=0.47.0",
 ]
+
+[dependency-groups]
 dev = [
     "ruff>=0.7.0",
 ]
@@ -78,23 +79,22 @@ src = ["src"]
 
 [tool.ruff.lint]
 select = [
-    "E",     # pycodestyle errors
-    "F",     # pyflakes
-    "I",     # isort
-    "B",     # flake8-bugbear
-    "UP",    # pyupgrade
-    "N",     # pep8-naming
-    "S",     # flake8-bandit
-    "C4",    # flake8-comprehensions
-    "RET",   # flake8-return
-    "SIM",   # flake8-simplify
+    "E",
+    "F",
+    "I",
+    "B",
+    "UP",
+    "N",
+    "S",
+    "C4",
+    "RET",
+    "SIM",
 ]
-# Ignore line length
 extend-ignore = ["E501"]
 ignore = [
-    "S101",    # Use of assert detected - reasonable for tests and validation
-    "SIM110",  # Use any() - no current violations, keeping for edge cases
-    "SIM118",  # Use `key in dict` instead of `key in dict.keys()` - no current violations
+    "S101",
+    "SIM110",
+    "SIM118",
 ]
 
 [tool.pytest.ini_options]
@@ -139,6 +139,4 @@ exclude_lines = [
     "if TYPE_CHECKING:",
     "if typing.TYPE_CHECKING:",
 ]
-# Note: Overall coverage is low due to untested CLI and TUI modules
-# Focus testing on the src/namecheap core library
 precision = 2

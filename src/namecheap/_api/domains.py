@@ -288,6 +288,56 @@ class DomainsAPI(BaseAPI):
         assert isinstance(result, dict)
         return bool(result)
 
+    def set_nameservers(
+        self, domain: str, nameservers: list[str], *, reset: bool = False
+    ) -> bool:
+        """
+        Set custom nameservers for a domain, or reset to Namecheap defaults.
+
+        Args:
+            domain: Domain name
+            nameservers: List of custom nameservers (max 5, ignored if reset=True)
+            reset: Reset to Namecheap BasicDNS (default: False)
+
+        Returns:
+            True if successful
+
+        Examples:
+            >>> nc.domains.set_nameservers("example.com",
+            ...     ["ns1.cloudflare.com", "ns2.cloudflare.com"]
+            ... )
+
+            >>> nc.domains.set_nameservers("example.com",
+            ...     [], reset=True
+            ... )
+        """
+        ext = tldextract.extract(domain)
+        if not ext.domain or not ext.suffix:
+            raise ValueError(f"Invalid domain name: {domain}")
+
+        if reset:
+            params = {"SLD": ext.domain, "TLD": ext.suffix}
+            command = "namecheap.domains.dns.setDefault"
+        else:
+            if not nameservers:
+                raise ValueError(
+                    "At least one nameserver is required when reset=False"
+                )
+            if len(nameservers) > 5:
+                raise ValueError("Maximum 5 nameservers allowed")
+            params = {
+                "SLD": ext.domain,
+                "TLD": ext.suffix,
+                "Nameservers": ",".join(nameservers),
+            }
+            command = "namecheap.domains.dns.setCustom"
+
+        result: Any = self._request(
+            command, params, path="DomainDNSSetCustomResult"
+        )
+        assert isinstance(result, dict)
+        return bool(result)
+
     def _get_pricing(
         self, domains: builtins.list[str]
     ) -> dict[str, dict[str, Decimal | None]]:

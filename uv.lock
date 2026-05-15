@@ -319,7 +319,6 @@ name = "namecheap-python"
 version = "1.0.4"
 source = { editable = "." }
 dependencies = [
-    { name = "click" },
     { name = "httpx" },
     { name = "pydantic" },
     { name = "python-dotenv" },
@@ -340,6 +339,11 @@ cli = [
     { name = "platformdirs" },
     { name = "pyyaml" },
 ]
+tui = [
+    { name = "textual" },
+]
+
+[package.dev-dependencies]
 dev = [
     { name = "ruff" },
 ]
@@ -352,37 +356,37 @@ test = [
     { name = "pytest-timeout" },
     { name = "pytest-xdist" },
 ]
-tui = [
-    { name = "textual" },
-]
 
 [package.metadata]
 requires-dist = [
-    { name = "click", specifier = ">=8.2.1" },
     { name = "click", marker = "extra == 'all'", specifier = ">=8.1.0" },
     { name = "click", marker = "extra == 'cli'", specifier = ">=8.1.0" },
-    { name = "faker", marker = "extra == 'test'", specifier = ">=19.6.0" },
     { name = "httpx", specifier = ">=0.27.0" },
-    { name = "hypothesis", marker = "extra == 'test'", specifier = ">=6.82.0" },
     { name = "platformdirs", marker = "extra == 'all'", specifier = ">=4.0.0" },
     { name = "platformdirs", marker = "extra == 'cli'", specifier = ">=4.0.0" },
     { name = "pydantic", specifier = ">=2.5.0" },
-    { name = "pytest", marker = "extra == 'test'", specifier = ">=7.4.0" },
-    { name = "pytest-cov", marker = "extra == 'test'", specifier = ">=4.1.0" },
-    { name = "pytest-mock", marker = "extra == 'test'", specifier = ">=3.11.1" },
-    { name = "pytest-timeout", marker = "extra == 'test'", specifier = ">=2.1.0" },
-    { name = "pytest-xdist", marker = "extra == 'test'", specifier = ">=3.3.0" },
     { name = "python-dotenv", specifier = ">=1.0.0" },
     { name = "pyyaml", marker = "extra == 'all'", specifier = ">=6.0.0" },
     { name = "pyyaml", marker = "extra == 'cli'", specifier = ">=6.0.0" },
     { name = "rich", specifier = ">=13.0.0" },
-    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.7.0" },
     { name = "textual", marker = "extra == 'all'", specifier = ">=0.47.0" },
     { name = "textual", marker = "extra == 'tui'", specifier = ">=0.47.0" },
     { name = "tldextract", specifier = ">=5.0.0" },
     { name = "xmltodict", specifier = ">=0.13.0" },
 ]
-provides-extras = ["cli", "tui", "all", "dev", "test"]
+provides-extras = ["cli", "tui", "all"]
+
+[package.metadata.requires-dev]
+dev = [{ name = "ruff", specifier = ">=0.7.0" }]
+test = [
+    { name = "faker", specifier = ">=19.6.0" },
+    { name = "hypothesis", specifier = ">=6.82.0" },
+    { name = "pytest", specifier = ">=7.4.0" },
+    { name = "pytest-cov", specifier = ">=4.1.0" },
+    { name = "pytest-mock", specifier = ">=3.11.1" },
+    { name = "pytest-timeout", specifier = ">=2.1.0" },
+    { name = "pytest-xdist", specifier = ">=3.3.0" },
+]
 
 [[package]]
 name = "packaging"
