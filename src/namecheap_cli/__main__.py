@@ -359,6 +359,66 @@ def domain_check(config: Config, domains: tuple[str, ...], file) -> None:
         sys.exit(1)
 
 
+@domain_group.group("nameservers")
+def nameservers_group() -> None:
+    """Nameserver management commands."""
+    pass
+
+
+@nameservers_group.command("set")
+@click.argument("domain")
+@click.argument("nameservers", nargs=-1, required=False)
+@click.option("--reset", is_flag=True, help="Reset to Namecheap BasicDNS")
+@pass_config
+def nameservers_set(
+    config: Config, domain: str, nameservers: tuple[str, ...], reset: bool
+) -> None:
+    """Set custom nameservers or reset to Namecheap defaults."""
+    nc = config.init_client()
+
+    if not nameservers and not reset:
+        console.print(
+            "[red]❌ Provide nameservers or use --reset to reset to defaults[/red]"
+        )
+        sys.exit(1)
+
+    try:
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            transient=True,
+        ) as progress:
+            progress.add_task(
+                f"{'Resetting' if reset else 'Setting'} nameservers for {domain}...",
+                total=None,
+            )
+            success = nc.domains.set_nameservers(
+                domain, list(nameservers), reset=reset
+            )
+
+        if success:
+            if reset:
+                console.print(
+                    f"[green]✅ Reset {domain} to Namecheap BasicDNS[/green]"
+                )
+            else:
+                console.print(
+                    f"[green]✅ Set nameservers for {domain}: "
+                    f"{', '.join(nameservers)}[/green]"
+                )
+                console.print(
+                    "[yellow]⚠️  Note: URL forwarding, Email forwarding, "
+                    "and Dynamic DNS will not work with custom nameservers[/yellow]"
+                )
+        else:
+            console.print(f"[red]❌ Failed to update nameservers for {domain}[/red]")
+            sys.exit(1)
+
+    except NamecheapError as e:
+        console.print(f"[red]❌ Error: {e}[/red]")
+        sys.exit(1)
+
+
 @domain_group.command("info")
 @click.argument("domain")
 @pass_config

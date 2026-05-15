@@ -145,6 +145,130 @@ class DNSRecordBuilder:
         )
         return self
 
+    def srv(self, name: str, target: str, port: int, priority: int = 10, weight: int = 10, ttl: int = 1800) -> Self:
+        """
+        Add an SRV record.
+
+        Args:
+            name: Record name (service name, typically _service._proto.name)
+            target: Target hostname
+            port: Port number
+            priority: Priority (0-65535, lower = higher priority)
+            weight: Weight for load balancing (0-65535)
+            ttl: Time to live in seconds
+
+        Returns:
+            Self for chaining
+
+        Raises:
+            ValueError: If priority, weight, or port are outside valid range (0-65535)
+        """
+        # Validate SRV parameters according to RFC 2782
+        for param_name, param_value in (("priority", priority), ("weight", weight), ("port", port)):
+            if not (0 <= param_value <= 65535):
+                raise ValueError(f"SRV {param_name} must be between 0 and 65535 (got {param_value})")
+        
+        # SRV records require priority, weight, and port in the value
+        # Format: priority weight port target
+        srv_value = f"{priority} {weight} {port} {target}"
+        self._records.append(
+            DNSRecord.model_validate(
+                {"@Name": name, "@Type": "SRV", "@Address": srv_value, "@TTL": ttl}
+            )
+        )
+        return self
+
+    def caa(self, name: str, flags: int, tag: str, value: str, ttl: int = 1800) -> Self:
+        """
+        Add a CAA (Certificate Authority Authorization) record.
+
+        Args:
+            name: Record name (@ for root)
+            flags: CAA flags (typically 0)
+            tag: CAA tag (issue, issuewild, or iodef)
+            value: CAA value (CA domain or contact email)
+            ttl: Time to live in seconds
+
+        Returns:
+            Self for chaining
+
+        Raises:
+            ValueError: If tag is not one of the valid CAA tags
+            ValueError: If value contains unescaped double quotes
+        """
+        # Validate CAA tag according to RFC 6844
+        allowed_tags = {"issue", "issuewild", "iodef"}
+        if tag not in allowed_tags:
+            raise ValueError(f"Invalid CAA tag '{tag}'. Must be one of: {', '.join(sorted(allowed_tags))}")
+        
+        # Validate and escape value to prevent injection
+        if '"' in value and not (value.startswith('"') and value.endswith('"')):
+            raise ValueError("CAA value cannot contain unescaped double quotes")
+        
+        # CAA record format: flags tag value
+        caa_value = f'{flags} {tag} "{value}"'
+        self._records.append(
+            DNSRecord.model_validate(
+                {"@Name": name, "@Type": "CAA", "@Address": caa_value, "@TTL": ttl}
+            )
+        )
+        return self
+
+    def alias(self, name: str, target: str, ttl: int = 1800) -> Self:
+        """
+        Add an ALIAS record.
+
+        Args:
+            name: Record name
+            target: Target domain
+            ttl: Time to live in seconds
+
+        Returns:
+            Self for chaining
+        """
+        self._records.append(
+            DNSRecord.model_validate(
+                {"@Name": name, "@Type": "ALIAS", "@Address": target, "@TTL": ttl}
+            )
+        )
+        return self
+
+    def mxe(self, name: str, ip: str, priority: int = 10, ttl: int = 1800) -> Self:
+        """
+        Add an MXE record (MX by IP address).
+
+        Args:
+            name: Record name (@ for root)
+            ip: IPv4 address of mail server
+            priority: MX priority (lower = higher priority)
+            ttl: Time to live in seconds
+
+        Returns:
+            Self for chaining
+
+        Raises:
+            ValueError: If ip is not a valid IPv4 address
+        """
+        # Validate IPv4 address format
+        import ipaddress
+        try:
+            ipaddress.IPv4Address(ip)
+        except (ipaddress.AddressValueError, ValueError) as e:
+            raise ValueError(f"Invalid IPv4 address for MXE record: {ip}") from e
+        
+        self._records.append(
+            DNSRecord.model_validate(
+                {
+                    "@Name": name,
+                    "@Type": "MXE",
+                    "@Address": ip,
+                    "@TTL": ttl,
+                    "@MXPref": priority,
+                }
+            )
+        )
+        return self
+
     def url(
         self,
         name: str,
