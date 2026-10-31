@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import pytest
-from hypothesis import given, strategies as st
+from hypothesis import given
+from hypothesis import strategies as st
+from pydantic import ValidationError
+
 from namecheap.models import DNSRecord
 
 
@@ -57,7 +60,7 @@ class TestDNSRecordModel:
 
     def test_invalid_dns_type_raises_error(self) -> None:
         """Test that invalid DNS type raises validation error."""
-        with pytest.raises(Exception):  # pydantic.ValidationError
+        with pytest.raises(ValidationError):
             DNSRecord.model_validate({
                 "@Name": "test",
                 "@Type": "INVALID_TYPE",

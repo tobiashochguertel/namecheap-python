@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pytest
+
 from namecheap._api.domains import DomainsAPI
 
 
