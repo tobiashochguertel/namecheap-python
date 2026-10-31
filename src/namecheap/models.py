@@ -7,9 +7,9 @@ from datetime import datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any, Literal
 
-import xmltodict
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, computed_field, field_validator
 
+from namecheap.idn import from_punycode
 from namecheap.logging import logger
 
 if TYPE_CHECKING:
@@ -24,26 +24,6 @@ class XMLModel(BaseModel):
         str_strip_whitespace=True,
         extra="allow",  # Allow extra fields for debugging
     )
-
-    @classmethod
-    def from_xml(cls, xml: str, path: str | None = None) -> Self | list[Self]:
-        """Parse XML response into model."""
-        data = xmltodict.parse(xml)
-
-        # Navigate to the path if provided
-        if path:
-            for key in path.split("."):
-                data = data.get(key, {})
-
-        # Handle empty response
-        if not data:
-            return []
-
-        # Ensure list for consistency
-        items = data if isinstance(data, list) else [data]
-
-        # Parse each item
-        return [cls.model_validate(item) for item in items]
 
     @field_validator("*", mode="before")
     @classmethod
@@ -153,6 +133,12 @@ class DomainCheck(XMLModel):
                 return None
         return v if isinstance(v, Decimal) else None
 
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def unicode_domain(self) -> str:
+        """`domain` in Unicode form ('xn--3u9h.to' → '🧊.to'), identical for ASCII."""
+        return from_punycode(self.domain)
+
     @property
     def price(self) -> Decimal | None:
         """Get the effective price for this domain."""
@@ -188,7 +174,7 @@ class DNSRecord(XMLModel):
         Field(alias="@Type")
     )
     value: str = Field(alias="@Address")
-    ttl: int = Field(alias="@TTL", default=1800)
+    ttl: int = Field(alias="@TTL", default=1799)  # 1799 = "Automatic" in Namecheap UI
     priority: int | None = Field(alias="@MXPref", default=None)
 
     @field_validator("ttl", mode="before")
@@ -196,9 +182,9 @@ class DNSRecord(XMLModel):
     def parse_ttl(cls, v: Any) -> int:
         """Ensure TTL is within valid range."""
         try:
-            ttl = int(v) if v else 1800
+            ttl = int(v) if v else 1799
         except (ValueError, TypeError):
-            ttl = 1800
+            ttl = 1799
         return max(60, min(86400, ttl))
 
     @field_validator("priority", mode="before")
@@ -226,6 +212,12 @@ class Domain(XMLModel):
     auto_renew: bool = Field(alias="@AutoRenew", default=False)
     whois_guard: bool = Field(alias="@WhoisGuard", default=False)
 
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def unicode_name(self) -> str:
+        """`name` in Unicode form ('xn--3u9h.to' → '🧊.to'), identical for ASCII."""
+        return from_punycode(self.name)
+
     @field_validator("whois_guard", mode="before")
     @classmethod
     def parse_whois_guard(cls, v: Any) -> bool:
@@ -239,13 +231,127 @@ class Domain(XMLModel):
     @field_validator("created", "expires", mode="before")
     @classmethod
     def parse_datetime(cls, v: Any) -> datetime:
-        """Parse datetime strings."""
+        """Parse datetime from Namecheap API or Pydantic serialization."""
         if isinstance(v, datetime):
             return v
         if isinstance(v, str):
-            # Namecheap uses MM/DD/YYYY format
-            return datetime.strptime(v, "%m/%d/%Y")
+            # Namecheap API format (MM/DD/YYYY)
+            if "/" in v:
+                return datetime.strptime(v, "%m/%d/%Y")
+            # Pydantic serialization format (ISO 8601)
+            return datetime.fromisoformat(v)
         raise ValueError(f"Cannot parse datetime from {v}")
+
+
+class AccountBalance(BaseModel):
+    """Account balance information."""
+
+    currency: str = Field(alias="@Currency")
+    available_balance: Decimal = Field(alias="@AvailableBalance")
+    account_balance: Decimal = Field(alias="@AccountBalance")
+    earned_amount: Decimal = Field(alias="@EarnedAmount")
+    withdrawable_amount: Decimal = Field(alias="@WithdrawableAmount")
+    funds_required_for_auto_renew: Decimal = Field(alias="@FundsRequiredForAutoRenew")
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    @field_validator(
+        "available_balance",
+        "account_balance",
+        "earned_amount",
+        "withdrawable_amount",
+        "funds_required_for_auto_renew",
+        mode="before",
+    )
+    @classmethod
+    def parse_decimal(cls, v: Any) -> Decimal:
+        return Decimal(str(v)) if v is not None else Decimal("0")
+
+
+class DomainInfo(BaseModel):
+    """Detailed domain information from getInfo."""
+
+    id: int = Field(alias="@ID")
+    domain: str = Field(alias="@DomainName")
+    owner: str = Field(alias="@OwnerName")
+    is_owner: bool = Field(alias="@IsOwner")
+    is_premium: bool = Field(alias="@IsPremium", default=False)
+    status: str = Field(alias="@Status")
+    created: str | None = Field(default=None)
+    expires: str | None = Field(default=None)
+    whoisguard_enabled: bool = Field(default=False)
+    dns_provider: str | None = Field(default=None)
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def unicode_domain(self) -> str:
+        """`domain` in Unicode form ('xn--3u9h.to' → '🧊.to'), identical for ASCII."""
+        return from_punycode(self.domain)
+
+    @field_validator("is_owner", "is_premium", mode="before")
+    @classmethod
+    def parse_bool(cls, v: Any) -> bool:
+        if isinstance(v, bool):
+            return v
+        if isinstance(v, str):
+            return v.lower() == "true"
+        return False
+
+
+class EmailForward(BaseModel):
+    """Email forwarding rule."""
+
+    mailbox: str = Field(alias="@mailbox")
+    forward_to: str
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class ForSalePrice(BaseModel):
+    """An `fval=` asking price. Indicative only (RFC 10023 §4): never binding."""
+
+    currency: str = Field(description="Uppercase code, ISO 4217 for fiat (USD, EUR)")
+    amount: Decimal
+
+    def __str__(self) -> str:
+        return f"{self.currency} {self.amount:,}"
+
+
+class ForSale(BaseModel):
+    """What a domain's `_for-sale` TXT records (RFC 10023) say.
+
+    Exists only when at least one record carries the `v=FORSALE1;` version tag:
+    that alone means the holder signals the name is for sale, even when no
+    content tag is present or the content is invalid (RFC 10023 §2.1).
+    Text is sanitised: control and bidirectional-override characters become
+    U+FFFD, so a record cannot rewrite the terminal or the line it is shown in.
+    """
+
+    domain: str = Field(description="The domain asked about, as queried (punycode)")
+    furi: list[str] = Field(default_factory=list, description="Contact URIs")
+    ftxt: list[str] = Field(default_factory=list, description="Human text")
+    fval: list[ForSalePrice] = Field(default_factory=list, description="Prices")
+    fcod: list[str] = Field(
+        default_factory=list, description="Codes for cooperating parties"
+    )
+    invalid: list[str] = Field(
+        default_factory=list,
+        description="Versioned records whose content is absent or malformed",
+    )
+    notes: list[str] = Field(
+        default_factory=list,
+        description="TXT strings in the same RRset without the version tag:"
+        " not an indicator, only context for a human (§2.1)",
+    )
+
+
+class Nameservers(BaseModel):
+    """Current nameserver configuration for a domain."""
+
+    is_default: bool = Field(description="True when using Namecheap's own DNS")
+    nameservers: list[str] = Field(description="Nameserver hostnames")
 
 
 class Contact(BaseModel):
@@ -266,6 +372,151 @@ class Contact(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
 
+class DomainContacts(BaseModel):
+    """Contact information for all roles on a domain."""
+
+    registrant: Contact
+    tech: Contact
+    admin: Contact
+    aux_billing: Contact
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class Tld(BaseModel):
+    """TLD information from Namecheap's supported TLD list."""
+
+    name: str = Field(alias="@Name")
+    description: str = Field(alias="#text", default="")
+    type: str = Field(alias="@Type")
+    min_register_years: int = Field(alias="@MinRegisterYears")
+    max_register_years: int = Field(alias="@MaxRegisterYears")
+    min_renew_years: int = Field(alias="@MinRenewYears")
+    max_renew_years: int = Field(alias="@MaxRenewYears")
+    min_transfer_years: int = Field(alias="@MinTransferYears")
+    max_transfer_years: int = Field(alias="@MaxTransferYears")
+    is_api_registerable: bool = Field(alias="@IsApiRegisterable")
+    is_api_renewable: bool = Field(alias="@IsApiRenewable")
+    is_api_transferable: bool = Field(alias="@IsApiTransferable")
+    is_epp_required: bool = Field(alias="@IsEppRequired")
+    is_disable_mod_contact: bool = Field(alias="@IsDisableModContact")
+    is_disable_wg_allot: bool = Field(alias="@IsDisableWGAllot")
+    is_supports_idn: bool = Field(alias="@IsSupportsIDN")
+    category: str = Field(alias="@Category", default="")
+    sequence_number: int = Field(alias="@SequenceNumber", default=0)
+    non_real_time: bool = Field(alias="@NonRealTime", default=False)
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    @field_validator(
+        "is_api_registerable",
+        "is_api_renewable",
+        "is_api_transferable",
+        "is_epp_required",
+        "is_disable_mod_contact",
+        "is_disable_wg_allot",
+        "is_supports_idn",
+        "non_real_time",
+        mode="before",
+    )
+    @classmethod
+    def parse_bool(cls, v: Any) -> bool:
+        if isinstance(v, bool):
+            return v
+        if isinstance(v, str):
+            return v.lower() == "true"
+        return False
+
+    @field_validator(
+        "min_register_years",
+        "max_register_years",
+        "min_renew_years",
+        "max_renew_years",
+        "min_transfer_years",
+        "max_transfer_years",
+        "sequence_number",
+        mode="before",
+    )
+    @classmethod
+    def parse_int(cls, v: Any) -> int:
+        return int(v) if v else 0
+
+
+class WhoisguardEntry(BaseModel):
+    """A WhoisGuard/domain privacy subscription."""
+
+    id: int = Field(alias="@ID")
+    domain: str = Field(alias="@DomainName", default="")
+    created: str = Field(alias="@Created", default="")
+    expires: str = Field(alias="@Expires", default="")
+    status: str = Field(alias="@Status", default="")
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    @field_validator("id", mode="before")
+    @classmethod
+    def parse_id(cls, v: Any) -> int:
+        return int(v) if v else 0
+
+
+class ProductPrice(BaseModel):
+    """A single price entry for a product at a specific duration."""
+
+    duration: int = Field(alias="@Duration")
+    duration_type: str = Field(alias="@DurationType", default="YEAR")
+    price: Decimal = Field(alias="@Price")
+    regular_price: Decimal = Field(alias="@RegularPrice")
+    your_price: Decimal = Field(alias="@YourPrice")
+    coupon_price: Decimal | None = Field(alias="@CouponPrice", default=None)
+    currency: str = Field(alias="@Currency", default="USD")
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    @field_validator(
+        "price", "regular_price", "your_price", "coupon_price", mode="before"
+    )
+    @classmethod
+    def parse_decimal(cls, v: Any) -> Decimal | None:
+        if v is None or v == "":
+            return None
+        return Decimal(str(v))
+
+    @field_validator("duration", mode="before")
+    @classmethod
+    def parse_duration(cls, v: Any) -> int:
+        return int(v) if v else 1
+
+
+def api_url(*, sandbox: bool) -> str:
+    """The XML API endpoint: production, or the sandbox (a separate account)."""
+    if sandbox:
+        return "https://api.sandbox.namecheap.com/xml.response"
+    return "https://api.namecheap.com/xml.response"
+
+
+_TRUE = ("true", "1", "yes", "on")
+_FALSE = ("false", "0", "no", "off")
+
+
+def parse_sandbox(value: str | None) -> bool:
+    """NAMECHEAP_SANDBOX as a bool: unset or empty means production.
+
+    Anything that is not a recognised yes/no raises, so a typo can never send
+    calls to an API the caller did not mean.
+    """
+    if value is None or value.strip() == "":
+        return False
+    normalized = value.strip().lower()
+    if normalized in _TRUE:
+        return True
+    if normalized in _FALSE:
+        return False
+    raise ValueError(
+        f"NAMECHEAP_SANDBOX={value!r} is neither true nor false"
+        f" (accepted: {', '.join(_TRUE + _FALSE)})"
+    )
+
+
 class Config(BaseModel):
     """Client configuration with validation."""
 
@@ -273,13 +524,26 @@ class Config(BaseModel):
     username: str = Field(description="Namecheap username")
     api_user: str = Field(description="API username (defaults to username)")
     client_ip: str = Field(description="Whitelisted IP address")
-    sandbox: bool = Field(default=True, description="Use sandbox API")
+    sandbox: bool = Field(
+        default=False,
+        description=(
+            "Use the sandbox API (api.sandbox.namecheap.com). The sandbox is a separate"
+            " account with its own API key: a production key is rejected there."
+        ),
+    )
     log_level: str = Field(default="INFO", description="Logging level")
 
     model_config = ConfigDict(
         str_strip_whitespace=True,
         validate_default=True,
     )
+
+    @field_validator("api_key", "username")
+    @classmethod
+    def validate_required(cls, v: str) -> str:
+        if not v:
+            raise ValueError("must not be empty")
+        return v
 
     @field_validator("log_level")
     @classmethod
@@ -307,35 +571,30 @@ class Config(BaseModel):
 
     @classmethod
     def from_env(cls, **overrides: Any) -> Self:
-        """Load from environment with overrides."""
-        from dotenv import dotenv_values
+        """Load from os.environ with constructor overrides.
 
-        # Load .env file
-        env_values = dotenv_values()
+        The SDK does not read `.env` files implicitly. Applications that want
+        `.env` loading must call `load_dotenv()` themselves or use
+        `Namecheap.from_env_file(path)`.
+        """
 
-        # Merge environment variables (os.environ takes precedence over .env)
-        env_values.update(os.environ)
-
-        # Helper to get value with override
         def get_value(key: str, env_key: str, default: Any = None) -> Any:
             if key in overrides and overrides[key] is not None:
                 return overrides[key]
-            return env_values.get(env_key, default)
+            return os.environ.get(env_key, default)
 
-        # Get values
         api_key = get_value("api_key", "NAMECHEAP_API_KEY", "")
         username = get_value("username", "NAMECHEAP_USERNAME", "")
         api_user = get_value("api_user", "NAMECHEAP_API_USER", username or "")
         client_ip = get_value("client_ip", "NAMECHEAP_CLIENT_IP", "")
         log_level = get_value("log_level", "NAMECHEAP_LOG_LEVEL", "INFO")
 
-        # Parse sandbox with proper boolean handling
         if "sandbox" in overrides and overrides["sandbox"] is not None:
-            sandbox = bool(overrides["sandbox"])
+            sandbox = overrides["sandbox"]
+            if not isinstance(sandbox, bool):
+                raise ValueError(f"sandbox must be True or False, got {sandbox!r}")
         else:
-            sandbox_str = env_values.get("NAMECHEAP_SANDBOX", "true")
-            sandbox_str = sandbox_str.lower() if sandbox_str else "true"
-            sandbox = sandbox_str in ("true", "1", "yes", "on")
+            sandbox = parse_sandbox(os.environ.get("NAMECHEAP_SANDBOX"))
 
         # Auto-detect IP if not provided
         if not client_ip:

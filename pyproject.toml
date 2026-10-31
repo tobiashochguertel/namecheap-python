@@ -1,6 +1,6 @@
 [project]
 name = "namecheap-python"
-version = "1.0.4"
+version = "4.0.0"
 description = "A friendly Python SDK for Namecheap API"
 authors = [{name = "Adrian Galilea Delgado", email = "adriangalilea@gmail.com"}]
 readme = "README.md"
@@ -25,6 +25,7 @@ dependencies = [
     "rich>=13.0.0",
     "xmltodict>=0.13.0",
     "tldextract>=5.0.0",
+    "dnspython>=2.6.0",
 ]
 
 [project.urls]
@@ -41,11 +42,15 @@ cli = [
 tui = [
     "textual>=0.47.0",
 ]
+socks = [
+    "socksio>=1.0.0",
+]
 all = [
     "click>=8.1.0",
     "PyYAML>=6.0.0",
     "platformdirs>=4.0.0",
     "textual>=0.47.0",
+    "socksio>=1.0.0",
 ]
 
 [dependency-groups]
@@ -72,6 +77,10 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/namecheap", "src/namecheap_cli", "src/namecheap_dns_tui"]
+exclude = ["**/*_check.py"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"CLI.md" = "namecheap_cli/CLI.md"
 
 [tool.ruff]
 target-version = "py312"
@@ -140,3 +149,6 @@ exclude_lines = [
     "if typing.TYPE_CHECKING:",
 ]
 precision = 2
+
+[tool.ruff.lint.per-file-ignores]
+"**/*_check.py" = ["S603"]  # subprocess calls are intentional in boundary checks
