@@ -39,10 +39,19 @@ class TestDNSOperationsWithMocks:
 
     def test_dns_workflow_with_multiple_operations(self, sample_dns_get_response: str) -> None:
         """Test a complete DNS workflow."""
+        import xmltodict
+
+        from namecheap._api.base import navigate_path, normalize_xml_response
         from namecheap.models import DNSRecord
-        
-        # Parse existing records
-        records = DNSRecord.from_xml(sample_dns_get_response, "DomainDNSGetHostsResult.host")
+
+        # Parse existing records the same way BaseAPI._request does
+        data = normalize_xml_response(xmltodict.parse(sample_dns_get_response))
+        result = navigate_path(
+            data.get("ApiResponse", {}), "DomainDNSGetHostsResult.host"
+        )
+        if not isinstance(result, list):
+            result = [result]
+        records = [DNSRecord.model_validate(r) for r in result]
         
         # Verify we got records
         assert len(records) > 0

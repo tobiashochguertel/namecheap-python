@@ -441,7 +441,7 @@ class DomainsAPI(BaseAPI):
             ...     [], reset=True
             ... )
         """
-        ext = tldextract.extract(domain)
+        ext = split_domain(to_punycode(domain))
         if not ext.domain or not ext.suffix:
             raise ValueError(f"Invalid domain name: {domain}")
 
