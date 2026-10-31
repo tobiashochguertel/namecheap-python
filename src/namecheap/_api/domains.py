@@ -450,9 +450,7 @@ class DomainsAPI(BaseAPI):
             command = "namecheap.domains.dns.setDefault"
         else:
             if not nameservers:
-                raise ValueError(
-                    "At least one nameserver is required when reset=False"
-                )
+                raise ValueError("At least one nameserver is required when reset=False")
             if len(nameservers) > 5:
                 raise ValueError("Maximum 5 nameservers allowed")
             params = {
@@ -462,9 +460,7 @@ class DomainsAPI(BaseAPI):
             }
             command = "namecheap.domains.dns.setCustom"
 
-        result: Any = self._request(
-            command, params, path="DomainDNSSetCustomResult"
-        )
+        result: Any = self._request(command, params, path="DomainDNSSetCustomResult")
         assert isinstance(result, dict)
         return bool(result)
 

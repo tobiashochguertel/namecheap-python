@@ -59,10 +59,10 @@ def env_vars_mock(monkeypatch: pytest.MonkeyPatch) -> dict[str, str]:
         "NAMECHEAP_SANDBOX": "true",
         "NAMECHEAP_LOG_LEVEL": "DEBUG",
     }
-    
+
     for key, value in test_env.items():
         monkeypatch.setenv(key, value)
-    
+
     return test_env
 
 
@@ -114,7 +114,7 @@ def sample_dns_get_response(sample_dns_records: list[dict]) -> str:
         f'TTL="{r["@TTL"]}" MXPref="{r["@MXPref"]}" />'
         for r in sample_dns_records
     )
-    
+
     return f"""<?xml version="1.0" encoding="UTF-8"?>
 <ApiResponse Status="OK">
     <DomainDNSGetHostsResult Domain="example.com" EmailType="MXE">

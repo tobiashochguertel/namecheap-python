@@ -37,7 +37,9 @@ class TestDNSOperationsE2E:
 class TestDNSOperationsWithMocks:
     """E2E-style tests using mocked API responses."""
 
-    def test_dns_workflow_with_multiple_operations(self, sample_dns_get_response: str) -> None:
+    def test_dns_workflow_with_multiple_operations(
+        self, sample_dns_get_response: str
+    ) -> None:
         """Test a complete DNS workflow."""
         import xmltodict
 
@@ -52,14 +54,14 @@ class TestDNSOperationsWithMocks:
         if not isinstance(result, list):
             result = [result]
         records = [DNSRecord.model_validate(r) for r in result]
-        
+
         # Verify we got records
         assert len(records) > 0
-        
+
         # Simulate modifications
         a_records = [r for r in records if r.type == "A"]
         mx_records = [r for r in records if r.type == "MX"]
-        
+
         # Verify record types
         assert len(a_records) > 0 or len(mx_records) > 0
 
@@ -67,7 +69,7 @@ class TestDNSOperationsWithMocks:
         """Test that all supported DNS types work consistently."""
         from namecheap._api.dns import DNSRecordBuilder
         from namecheap.models import DNSRecord
-        
+
         all_types = [
             ("A", "@", "192.0.2.1"),
             ("AAAA", "@", "2001:db8::1"),
@@ -81,9 +83,9 @@ class TestDNSOperationsWithMocks:
             ("TXT", "@", "v=spf1 ~all"),
             ("URL301", "old", "https://new.example.com"),
         ]
-        
+
         builder = DNSRecordBuilder()
-        
+
         for dns_type, name, value in all_types:
             if dns_type == "A":
                 builder.a(name, value)
@@ -107,12 +109,12 @@ class TestDNSOperationsWithMocks:
                 builder.txt(name, value)
             elif dns_type == "URL301":
                 builder.url(name, value, redirect_type="301")
-        
+
         records = builder.build()
-        
+
         # Verify all records were created
         assert len(records) == len(all_types)
-        
+
         # Verify each record is valid
         for record in records:
             assert isinstance(record, DNSRecord)

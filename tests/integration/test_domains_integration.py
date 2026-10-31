@@ -75,8 +75,7 @@ class TestSetNameserversIntegration:
 
         nc = Namecheap(**client_kwargs)
         result = nc.domains.set_nameservers(
-            "example.com",
-            ["ns1.cloudflare.com", "ns2.cloudflare.com"]
+            "example.com", ["ns1.cloudflare.com", "ns2.cloudflare.com"]
         )
 
         assert result is True

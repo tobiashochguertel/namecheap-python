@@ -22,7 +22,7 @@ class TestDNSRecordBuilder:
         """Test adding A record via builder."""
         builder = DNSRecordBuilder()
         builder.a("@", "192.0.2.1")
-        
+
         records = builder.build()
         assert len(records) == 1
         assert records[0].type == "A"
@@ -32,7 +32,7 @@ class TestDNSRecordBuilder:
         """Test adding AAAA record via builder."""
         builder = DNSRecordBuilder()
         builder.aaaa("@", "2001:db8::1")
-        
+
         records = builder.build()
         assert len(records) == 1
         assert records[0].type == "AAAA"
@@ -42,7 +42,7 @@ class TestDNSRecordBuilder:
         """Test adding CNAME record via builder."""
         builder = DNSRecordBuilder()
         builder.cname("www", "example.com")
-        
+
         records = builder.build()
         assert len(records) == 1
         assert records[0].type == "CNAME"
@@ -51,7 +51,7 @@ class TestDNSRecordBuilder:
     def test_builder_cname_rejects_root(self) -> None:
         """Test that CNAME rejects root domain."""
         builder = DNSRecordBuilder()
-        
+
         with pytest.raises(ValueError, match="cannot be created for the root"):
             builder.cname("@", "example.com")
 
@@ -59,7 +59,7 @@ class TestDNSRecordBuilder:
         """Test adding MX record via builder."""
         builder = DNSRecordBuilder()
         builder.mx("@", "mail.example.com", priority=10)
-        
+
         records = builder.build()
         assert len(records) == 1
         assert records[0].type == "MX"
@@ -69,7 +69,7 @@ class TestDNSRecordBuilder:
         """Test adding TXT record via builder."""
         builder = DNSRecordBuilder()
         builder.txt("@", "v=spf1 include:_spf.google.com ~all")
-        
+
         records = builder.build()
         assert len(records) == 1
         assert records[0].type == "TXT"
@@ -79,7 +79,7 @@ class TestDNSRecordBuilder:
         """Test adding NS record via builder."""
         builder = DNSRecordBuilder()
         builder.ns("subdomain", "ns1.example.com")
-        
+
         records = builder.build()
         assert len(records) == 1
         assert records[0].type == "NS"
@@ -87,8 +87,10 @@ class TestDNSRecordBuilder:
     def test_builder_srv_record(self) -> None:
         """Test adding SRV record via builder."""
         builder = DNSRecordBuilder()
-        builder.srv("_sip._tcp", "sipserver.example.com", port=5060, priority=10, weight=60)
-        
+        builder.srv(
+            "_sip._tcp", "sipserver.example.com", port=5060, priority=10, weight=60
+        )
+
         records = builder.build()
         assert len(records) == 1
         assert records[0].type == "SRV"
@@ -100,7 +102,7 @@ class TestDNSRecordBuilder:
         """Test adding CAA record via builder."""
         builder = DNSRecordBuilder()
         builder.caa("@", 0, "issue", "letsencrypt.org")
-        
+
         records = builder.build()
         assert len(records) == 1
         assert records[0].type == "CAA"
@@ -110,7 +112,7 @@ class TestDNSRecordBuilder:
         """Test adding ALIAS record via builder."""
         builder = DNSRecordBuilder()
         builder.alias("www", "example.com")
-        
+
         records = builder.build()
         assert len(records) == 1
         assert records[0].type == "ALIAS"
@@ -119,7 +121,7 @@ class TestDNSRecordBuilder:
         """Test adding MXE record via builder."""
         builder = DNSRecordBuilder()
         builder.mxe("@", "192.0.2.1", priority=5)
-        
+
         records = builder.build()
         assert len(records) == 1
         assert records[0].type == "MXE"
@@ -129,7 +131,7 @@ class TestDNSRecordBuilder:
         """Test adding URL redirect with 301 status."""
         builder = DNSRecordBuilder()
         builder.url("old", "https://new.example.com", redirect_type="301")
-        
+
         records = builder.build()
         assert len(records) == 1
         assert records[0].type == "URL301"
@@ -138,7 +140,7 @@ class TestDNSRecordBuilder:
         """Test adding URL redirect with frame."""
         builder = DNSRecordBuilder()
         builder.url("frame", "https://framed.example.com", redirect_type="frame")
-        
+
         records = builder.build()
         assert len(records) == 1
         assert records[0].type == "FRAME"
@@ -152,7 +154,7 @@ class TestDNSRecordBuilder:
             .mx("@", "mail.example.com", priority=10)
             .txt("@", "v=spf1 ~all")
         )
-        
+
         records = builder.build()
         assert len(records) == 4
         assert records[0].type == "A"
@@ -165,7 +167,7 @@ class TestDNSRecordBuilder:
         builder = DNSRecordBuilder()
         builder.a("@", "192.0.2.1")
         builder.a("www", "192.0.2.2")
-        
+
         records = list(builder)
         assert len(records) == 2
         assert all(isinstance(r, DNSRecord) for r in records)
@@ -174,23 +176,26 @@ class TestDNSRecordBuilder:
         """Test builder len()."""
         builder = DNSRecordBuilder()
         assert len(builder) == 0
-        
+
         builder.a("@", "192.0.2.1")
         assert len(builder) == 1
-        
+
         builder.a("www", "192.0.2.2")
         assert len(builder) == 2
 
-    @pytest.mark.parametrize("ttl,expected", [
-        (1800, 1800),
-        (100, 100),
-        (86400, 86400),
-    ])
+    @pytest.mark.parametrize(
+        "ttl,expected",
+        [
+            (1800, 1800),
+            (100, 100),
+            (86400, 86400),
+        ],
+    )
     def test_builder_custom_ttl(self, ttl: int, expected: int) -> None:
         """Test builder with custom TTL values."""
         builder = DNSRecordBuilder()
         builder.a("@", "192.0.2.1", ttl=ttl)
-        
+
         records = builder.build()
         assert records[0].ttl == expected
 
@@ -200,7 +205,7 @@ class TestDNSRecordBuilder:
         builder.a("@", "192.0.2.1")
         builder.a("www", "192.0.2.2")
         builder.a("api", "192.0.2.3")
-        
+
         records = builder.build()
         assert len(records) == 3
         assert all(r.type == "A" for r in records)
@@ -224,10 +229,22 @@ class TestDNSRecordBuilder:
             .txt("@", "v=spf1 ~all")
             .url("old", "https://new.example.com")
         )
-        
+
         records = builder.build()
         assert len(records) == 11
-        
+
         # Verify all types are present
         types = {r.type for r in records}
-        assert types == {"A", "AAAA", "ALIAS", "CAA", "CNAME", "MX", "MXE", "NS", "SRV", "TXT", "URL301"}
+        assert types == {
+            "A",
+            "AAAA",
+            "ALIAS",
+            "CAA",
+            "CNAME",
+            "MX",
+            "MXE",
+            "NS",
+            "SRV",
+            "TXT",
+            "URL301",
+        }

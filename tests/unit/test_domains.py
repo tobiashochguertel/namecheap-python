@@ -13,7 +13,9 @@ class TestSetNameservers:
 
     def test_set_custom_nameservers(self, mocker):
         """Test setting custom nameservers."""
-        mock_request = mocker.patch.object(DomainsAPI, "_request", return_value={"@Updated": "true"})
+        mock_request = mocker.patch.object(
+            DomainsAPI, "_request", return_value={"@Updated": "true"}
+        )
         api = mocker.Mock(spec=DomainsAPI)
         api._request = mock_request
 
@@ -21,8 +23,7 @@ class TestSetNameservers:
         domains._request = mock_request
 
         result = domains.set_nameservers(
-            "example.com",
-            ["ns1.cloudflare.com", "ns2.cloudflare.com"]
+            "example.com", ["ns1.cloudflare.com", "ns2.cloudflare.com"]
         )
 
         assert result is True
@@ -38,14 +39,13 @@ class TestSetNameservers:
 
     def test_set_single_nameserver(self, mocker):
         """Test setting a single custom nameserver."""
-        mock_request = mocker.patch.object(DomainsAPI, "_request", return_value={"@Updated": "true"})
+        mock_request = mocker.patch.object(
+            DomainsAPI, "_request", return_value={"@Updated": "true"}
+        )
         domains = DomainsAPI.__new__(DomainsAPI)
         domains._request = mock_request
 
-        result = domains.set_nameservers(
-            "example.com",
-            ["ns1.custom.com"]
-        )
+        result = domains.set_nameservers("example.com", ["ns1.custom.com"])
 
         assert result is True
         mock_request.assert_called_once_with(
@@ -60,7 +60,9 @@ class TestSetNameservers:
 
     def test_reset_to_default(self, mocker):
         """Test resetting to Namecheap BasicDNS."""
-        mock_request = mocker.patch.object(DomainsAPI, "_request", return_value={"@Updated": "true"})
+        mock_request = mocker.patch.object(
+            DomainsAPI, "_request", return_value={"@Updated": "true"}
+        )
         domains = DomainsAPI.__new__(DomainsAPI)
         domains._request = mock_request
 
@@ -75,7 +77,9 @@ class TestSetNameservers:
 
     def test_reset_ignores_nameservers(self, mocker):
         """Test that reset=True ignores provided nameservers."""
-        mock_request = mocker.patch.object(DomainsAPI, "_request", return_value={"@Updated": "true"})
+        mock_request = mocker.patch.object(
+            DomainsAPI, "_request", return_value={"@Updated": "true"}
+        )
         domains = DomainsAPI.__new__(DomainsAPI)
         domains._request = mock_request
 
@@ -95,6 +99,7 @@ class TestSetNameservers:
     def test_too_many_nameservers(self):
         """Test that more than 5 nameservers raises error."""
         from namecheap._api.domains import DomainsAPI
+
         domains = DomainsAPI.__new__(DomainsAPI)
 
         with pytest.raises(ValueError, match="Maximum 5"):
@@ -119,7 +124,9 @@ class TestSetNameservers:
 
     def test_domain_with_subdomain(self, mocker):
         """Test strip SLD/TLD from full domain."""
-        mock_request = mocker.patch.object(DomainsAPI, "_request", return_value={"@Updated": "true"})
+        mock_request = mocker.patch.object(
+            DomainsAPI, "_request", return_value={"@Updated": "true"}
+        )
         domains = DomainsAPI.__new__(DomainsAPI)
         domains._request = mock_request
 
@@ -153,7 +160,9 @@ class TestSetNameservers:
 
     def test_multi_tld_domain(self, mocker):
         """Test domain with multi-part TLD."""
-        mock_request = mocker.patch.object(DomainsAPI, "_request", return_value={"@Updated": "true"})
+        mock_request = mocker.patch.object(
+            DomainsAPI, "_request", return_value={"@Updated": "true"}
+        )
         domains = DomainsAPI.__new__(DomainsAPI)
         domains._request = mock_request
 

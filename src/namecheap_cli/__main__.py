@@ -676,8 +676,6 @@ def domain_register(
         sys.exit(1)
 
 
-
-
 @domain_group.group("nameservers")
 def nameservers_group() -> None:
     """Nameserver management commands."""
@@ -711,15 +709,11 @@ def nameservers_set(
                 f"{'Resetting' if reset else 'Setting'} nameservers for {domain}...",
                 total=None,
             )
-            success = nc.domains.set_nameservers(
-                domain, list(nameservers), reset=reset
-            )
+            success = nc.domains.set_nameservers(domain, list(nameservers), reset=reset)
 
         if success:
             if reset:
-                console.print(
-                    f"[green]✅ Reset {domain} to Namecheap BasicDNS[/green]"
-                )
+                console.print(f"[green]✅ Reset {domain} to Namecheap BasicDNS[/green]")
             else:
                 console.print(
                     f"[green]✅ Set nameservers for {domain}: "
@@ -736,7 +730,6 @@ def nameservers_set(
     except NamecheapError as e:
         console.print(f"[red]❌ Error: {e}[/red]")
         sys.exit(1)
-
 
 
 @domain_group.command("info")

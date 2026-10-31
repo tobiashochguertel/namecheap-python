@@ -21,9 +21,9 @@ class TestDNSRecordBuilderIntegration:
             .a("www", "192.0.2.2")
             .mx("@", "mail.example.com", priority=10)
         )
-        
+
         records = builder.build()
-        
+
         # Verify we can access all attributes
         assert all(r.name for r in records)
         assert all(r.type for r in records)
@@ -34,13 +34,15 @@ class TestDNSRecordBuilderIntegration:
         """Test that builder records contain serializable data."""
         builder = (
             DNSRecordBuilder()
-            .srv("_sip._tcp", "sipserver.example.com", port=5060, priority=10, weight=60)
+            .srv(
+                "_sip._tcp", "sipserver.example.com", port=5060, priority=10, weight=60
+            )
             .caa("@", 0, "issue", "letsencrypt.org")
             .alias("www", "example.com")
         )
-        
+
         records = builder.build()
-        
+
         for record in records:
             # All fields should be convertible to strings/basic types
             assert isinstance(record.name, str)
@@ -55,9 +57,9 @@ class TestDNSRecordBuilderIntegration:
         builder.a("@", "192.0.2.1")
         builder.mx("@", "mail.example.com", priority=10)
         builder.txt("@", "v=spf1 ~all")
-        
+
         records = builder.build()
-        
+
         # Each record should have required fields for API submission
         for record in records:
             assert record.name  # Required
@@ -72,27 +74,31 @@ class TestDNSRecordEdgeCases:
 
     def test_ipv6_address_in_aaaa_record(self) -> None:
         """Test handling IPv6 addresses in AAAA records."""
-        record = DNSRecord.model_validate({
-            "@Name": "@",
-            "@Type": "AAAA",
-            "@Address": "2001:0db8:85a3:0000:0000:8a2e:0370:7334",
-            "@TTL": "1800",
-        })
-        
+        record = DNSRecord.model_validate(
+            {
+                "@Name": "@",
+                "@Type": "AAAA",
+                "@Address": "2001:0db8:85a3:0000:0000:8a2e:0370:7334",
+                "@TTL": "1800",
+            }
+        )
+
         assert record.type == "AAAA"
         assert "2001" in record.value
 
     def test_long_txt_record_value(self) -> None:
         """Test handling long TXT record values."""
         long_value = "v=DKIM1; k=rsa; p=" + "A" * 500
-        
-        record = DNSRecord.model_validate({
-            "@Name": "default._domainkey",
-            "@Type": "TXT",
-            "@Address": long_value,
-            "@TTL": "1800",
-        })
-        
+
+        record = DNSRecord.model_validate(
+            {
+                "@Name": "default._domainkey",
+                "@Type": "TXT",
+                "@Address": long_value,
+                "@TTL": "1800",
+            }
+        )
+
         assert record.type == "TXT"
         assert len(record.value) > 100
 
@@ -116,9 +122,9 @@ class TestDNSRecordTypeConsistency:
             ("TXT", "@", "v=spf1 ~all"),
             ("URL301", "old", "https://new.example.com"),
         ]
-        
+
         builder = DNSRecordBuilder()
-        
+
         for dns_type, name, value in all_types:
             if dns_type == "A":
                 builder.a(name, value)
@@ -142,12 +148,12 @@ class TestDNSRecordTypeConsistency:
                 builder.txt(name, value)
             elif dns_type == "URL301":
                 builder.url(name, value, redirect_type="301")
-        
+
         records = builder.build()
-        
+
         # Verify all records were created
         assert len(records) == len(all_types)
-        
+
         # Verify each record is valid
         for record in records:
             assert isinstance(record, DNSRecord)

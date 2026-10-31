@@ -170,9 +170,21 @@ class DNSRecord(XMLModel):
     """A DNS record."""
 
     name: str = Field(alias="@Name", default="@")
-    type: Literal["A", "AAAA", "ALIAS", "CAA", "CNAME", "MX", "MXE", "NS", "SRV", "TXT", "URL", "URL301", "FRAME"] = (
-        Field(alias="@Type")
-    )
+    type: Literal[
+        "A",
+        "AAAA",
+        "ALIAS",
+        "CAA",
+        "CNAME",
+        "MX",
+        "MXE",
+        "NS",
+        "SRV",
+        "TXT",
+        "URL",
+        "URL301",
+        "FRAME",
+    ] = Field(alias="@Type")
     value: str = Field(alias="@Address")
     ttl: int = Field(alias="@TTL", default=1799)  # 1799 = "Automatic" in Namecheap UI
     priority: int | None = Field(alias="@MXPref", default=None)
