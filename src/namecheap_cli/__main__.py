@@ -4,20 +4,32 @@
 from __future__ import annotations
 
 import json
+import re
 import sys
 from datetime import datetime, timedelta
+from importlib import resources
 from pathlib import Path
 from typing import Any
 
 import click
 import yaml
+from dns.exception import DNSException
 from rich.console import Console
+from rich.markup import escape
 from rich.progress import Progress, SpinnerColumn, TextColumn
 from rich.prompt import Confirm, Prompt
 from rich.table import Table
 
-from namecheap import Namecheap, NamecheapError
-from namecheap.models import DNSRecord
+from namecheap import (
+    ConfigurationError,
+    ForSale,
+    Namecheap,
+    NamecheapError,
+    for_sale_many,
+)
+from namecheap.forsale import records as for_sale_records
+from namecheap.models import Contact, DNSRecord
+from namecheap.tld import split_domain
 
 from .completion import get_completion_script
 
@@ -57,10 +69,12 @@ class Config:
         self.verbose: bool = False
         self.profile: str = "default"
         self.sandbox: bool | None = None
+        self.config_path: Path | None = None
+        self.debug: bool = False
 
     def load_config(self, config_path: Path | None = None) -> dict:
         """Load configuration from file."""
-        path = config_path or CONFIG_FILE
+        path = config_path or self.config_path or CONFIG_FILE
         if not path.exists():
             return {}
 
@@ -68,60 +82,49 @@ class Config:
             return yaml.safe_load(f) or {}
 
     def init_client(self) -> Namecheap:
-        """Initialize Namecheap client."""
+        """Initialize Namecheap client.
+
+        Resolution order: config file profile → NAMECHEAP_* env vars (incl. .env).
+        --sandbox/--production overrides both; neither given leaves the choice to
+        them (and production when nothing says otherwise).
+        """
         if self.client:
             return self.client
 
-        # Check if config file exists
-        if not CONFIG_FILE.exists():
-            console.print("[red]❌ Configuration not found![/red]")
-            console.print(
-                "\nPlease run [bold cyan]namecheap-cli config init[/bold cyan] to set up your configuration."
-            )
-            console.print(
-                f"\nThis will create a config file at: [dim]{CONFIG_FILE}[/dim]"
-            )
-            sys.exit(1)
+        config_file = self.config_path or CONFIG_FILE
+        profile_config: dict = {}
+        if config_file.exists():
+            config = self.load_config()
+            profile_config = config.get("profiles", {}).get(self.profile, {})
+            if not profile_config:
+                console.print(
+                    f"[red]❌ Profile '{self.profile}' not found in configuration![/red]"
+                )
+                console.print(
+                    f"\nAvailable profiles: {', '.join(config.get('profiles', {}).keys()) or 'none'}"
+                )
+                console.print(
+                    "\nRun [bold cyan]namecheap-cli config init[/bold cyan] to create a new profile."
+                )
+                sys.exit(1)
 
-        config = self.load_config()
-        profile_config = config.get("profiles", {}).get(self.profile, {})
-
-        # Check if profile exists
-        if not profile_config:
-            console.print(
-                f"[red]❌ Profile '{self.profile}' not found in configuration![/red]"
-            )
-            console.print(
-                f"\nAvailable profiles: {', '.join(config.get('profiles', {}).keys()) or 'none'}"
-            )
-            console.print(
-                "\nRun [bold cyan]namecheap-cli config init[/bold cyan] to create a new profile."
-            )
-            sys.exit(1)
-
-        # Override sandbox if specified
         if self.sandbox is not None:
             profile_config["sandbox"] = self.sandbox
 
         try:
             self.client = Namecheap(**profile_config)
             return self.client
-        except Exception as e:
-            # Check for common configuration errors
-            error_msg = str(e)
-            if (
-                "Parameter APIUser is missing" in error_msg
-                or "Parameter APIKey is missing" in error_msg
-            ):
-                console.print("[red]❌ Invalid or incomplete configuration![/red]")
+        except ConfigurationError as e:
+            console.print(f"[red]❌ {e}[/red]")
+            if not config_file.exists():
                 console.print(
-                    "\nYour configuration appears to be missing required fields."
-                )
-                console.print(
-                    "Please run [bold cyan]namecheap-cli config init[/bold cyan] to reconfigure."
+                    "\nSet [bold cyan]NAMECHEAP_API_KEY[/bold cyan] and [bold cyan]NAMECHEAP_USERNAME[/bold cyan] env vars,"
+                    " or run [bold cyan]namecheap-cli config init[/bold cyan] to create a config file."
                 )
             else:
-                console.print(f"[red]❌ Error initializing client: {e}[/red]")
+                console.print(
+                    "\nRun [bold cyan]namecheap-cli config init[/bold cyan] to reconfigure."
+                )
             sys.exit(1)
 
 
@@ -153,7 +156,14 @@ def output_formatter(data: Any, format: str, headers: list[str] | None = None) -
     "--config", "config_path", type=click.Path(exists=True), help="Config file path"
 )
 @click.option("--profile", default="default", help="Config profile to use")
-@click.option("--sandbox", is_flag=True, help="Use sandbox API")
+@click.option(
+    "--sandbox/--production",
+    default=None,
+    help=(
+        "Force the sandbox API (a separate account with its own key) or production."
+        " Default: the profile's `sandbox`, else NAMECHEAP_SANDBOX, else production."
+    ),
+)
 @click.option(
     "--output",
     "-o",
@@ -164,10 +174,19 @@ def output_formatter(data: Any, format: str, headers: list[str] | None = None) -
 @click.option("--no-color", is_flag=True, help="Disable colored output")
 @click.option("--quiet", "-q", is_flag=True, help="Minimal output")
 @click.option("--verbose", "-v", is_flag=True, help="Verbose output")
-@click.version_option()
+@click.option("--debug", is_flag=True, help="Show full traceback on errors")
+@click.version_option(package_name="namecheap-python")
 @pass_config
 def cli(
-    config: Config, config_path, profile, sandbox, output, no_color, quiet, verbose
+    config: Config,
+    config_path,
+    profile,
+    sandbox,
+    output,
+    no_color,
+    quiet,
+    verbose,
+    debug,
 ) -> None:
     """Namecheap CLI - Manage domains and DNS records."""
     config.output_format = output
@@ -176,9 +195,38 @@ def cli(
     config.verbose = verbose
     config.profile = profile
     config.sandbox = sandbox
+    config.config_path = Path(config_path) if config_path else None
+    config.debug = debug
 
     if no_color:
         console._color_system = None
+
+
+PRICE_DISCLAIMER = (
+    "* Asking prices come from the holder's own _for-sale record (RFC 10023):"
+    " indicative only, verify with the seller."
+)
+
+
+def for_sale_cell(sale: ForSale | None | DNSException) -> str:
+    """One table cell for a _for-sale lookup. Record text is the domain
+    holder's, so it is escaped: it can never become Rich markup."""
+    if isinstance(sale, DNSException):
+        return f"[red]lookup failed: {escape(type(sale).__name__)}[/red]"
+    if sale is None:
+        return ""
+    parts = [f"{escape(str(p))}*" for p in sale.fval]
+    parts += [escape(u) for u in sale.furi]
+    parts += [f'"{escape(t)}"' for t in sale.ftxt]
+    return "[magenta]for sale[/magenta]" + (f" {' · '.join(parts)}" if parts else "")
+
+
+def for_sale_json(sale: ForSale | None | DNSException) -> dict[str, Any] | None:
+    """The `for_sale` field of -o json/yaml: the parsed record, null when not
+    for sale, or {"error": ...} when the lookup itself failed (unknown)."""
+    if isinstance(sale, DNSException):
+        return {"error": f"{type(sale).__name__}: {sale}"}
+    return sale.model_dump(mode="json", exclude={"domain"}) if sale else None
 
 
 @cli.group("domain")
@@ -208,6 +256,8 @@ def domain_list(
         ) as progress:
             progress.add_task("Loading domains...", total=None)
             domains = nc.domains.list()
+            # Public DNS, so this is what buyers see, wherever the zone is hosted
+            sales = for_sale_many([d.name for d in domains])
 
         # Filter by status
         if status:
@@ -225,7 +275,8 @@ def domain_list(
 
         # Sort
         if sort == "name":
-            domains.sort(key=lambda d: d.name)
+            # Sort by what the table shows, so display order matches the column
+            domains.sort(key=lambda d: d.unicode_name)
         elif sort == "expires":
             domains.sort(key=lambda d: d.expires)
         elif sort == "created":
@@ -239,34 +290,49 @@ def domain_list(
             table.add_column("Expires", style="yellow")
             table.add_column("Auto-Renew")
             table.add_column("Locked")
+            table.add_column("For Sale (RFC 10023)", overflow="fold")
 
             for d in domains:
                 status_text = "Active" if not d.is_expired else "Expired"
                 status_style = "green" if not d.is_expired else "red"
                 table.add_row(
-                    d.name,
+                    d.unicode_name,
                     f"[{status_style}]{status_text}[/{status_style}]",
                     d.expires.strftime("%Y-%m-%d"),
                     "✓" if d.auto_renew else "✗",
                     "🔒" if d.is_locked else "",
+                    for_sale_cell(sales[d.name]),
                 )
 
             console.print(table)
+            priced = any(isinstance(s, ForSale) and s.fval for s in sales.values())
+            if priced and not config.quiet:
+                console.print(f"[dim]{PRICE_DISCLAIMER}[/dim]")
         else:
             data = [
                 {
                     "domain": d.name,
+                    "unicode": d.unicode_name,
                     "status": "active" if not d.is_expired else "expired",
                     "expires": d.expires.isoformat(),
                     "auto_renew": d.auto_renew,
                     "locked": d.is_locked,
+                    "for_sale": for_sale_json(sales[d.name]),
                 }
                 for d in domains
             ]
             output_formatter(
                 data,
                 config.output_format,
-                ["domain", "status", "expires", "auto_renew", "locked"],
+                [
+                    "domain",
+                    "unicode",
+                    "status",
+                    "expires",
+                    "auto_renew",
+                    "locked",
+                    "for_sale",
+                ],
             )
 
     except NamecheapError as e:
@@ -299,60 +365,311 @@ def domain_check(config: Config, domains: tuple[str, ...], file) -> None:
         ) as progress:
             progress.add_task(f"Checking {len(domain_list)} domains...", total=None)
             results = nc.domains.check(*domain_list, include_pricing=True)
+            # A taken name can still be bought if its holder says so in DNS
+            sales = for_sale_many([r.domain for r in results if not r.available])
 
         # Output
         if config.output_format == "table":
             table = Table(title="Domain Availability")
             table.add_column("Domain", style="cyan")
             table.add_column("Available", style="green")
-            table.add_column("Price (USD/year)", style="yellow")
+            table.add_column("1st Year", style="yellow")
+            table.add_column("Regular (USD/yr)", style="dim")
+            if sales:
+                table.add_column("For Sale (RFC 10023)", overflow="fold")
 
             for result in results:
                 available_text = "✅ Available" if result.available else "❌ Taken"
                 available_style = "green" if result.available else "red"
 
-                if result.available and result.price:
-                    price_text = f"${result.price:.2f}"
-                else:
-                    price_text = "-"
+                # total_price folds in ICANN/EAP fees when Namecheap reports them
+                price = result.total_price if result.available else None
+                price_text = f"${price:.2f}" if price else "-"
+                regular = result.regular_price if result.available else None
+                regular_text = f"${regular:.2f}" if regular else "-"
+
+                # `check` takes arbitrary input, so show the registry form too:
+                # a homograph ('аpple.com' with a Cyrillic а) is only visible there
+                shown = result.unicode_domain
+                if shown != result.domain:
+                    shown = f"{shown} [dim]({result.domain})[/dim]"
 
                 row = [
-                    result.domain,
+                    shown,
                     f"[{available_style}]{available_text}[/{available_style}]",
                     price_text,
+                    regular_text,
                 ]
-
+                if sales:
+                    row.append(
+                        "" if result.available else for_sale_cell(sales[result.domain])
+                    )
                 table.add_row(*row)
 
             console.print(table)
+            priced = any(isinstance(s, ForSale) and s.fval for s in sales.values())
+            if priced and not config.quiet:
+                console.print(f"[dim]{PRICE_DISCLAIMER}[/dim]")
 
             # Show suggestions for taken domains
-            taken = [r for r in results if not r.available]
+            # Only ASCII names get suggestions: .com/.net/.io accept no emoji,
+            # so "get🧊.com" is not a domain anyone can register
+            taken = [
+                r for r in results if not r.available and r.unicode_domain.isascii()
+            ]
             if taken and not config.quiet:
                 console.print("\n💡 [yellow]Suggestions for taken domains:[/yellow]")
                 for r in taken[:3]:  # Show up to 3 suggestions
-                    base = r.domain.split(".")[0]
+                    base = r.unicode_domain.split(".")[0]
                     suggestions = [
                         f"{base}.net",
                         f"{base}.io",
                         f"get{base}.com",
                         f"{base}app.com",
                     ]
-                    console.print(f"  • {r.domain} → {', '.join(suggestions[:3])}")
+                    console.print(
+                        f"  • {r.unicode_domain} → {', '.join(suggestions[:3])}"
+                    )
 
         else:
             data = []
             for result in results:
                 item = {
                     "domain": result.domain,
+                    "unicode": result.unicode_domain,
                     "available": result.available,
                 }
                 if result.available and result.price:
                     item["price"] = float(result.price)
+                if result.available and result.regular_price:
+                    item["regular_price"] = float(result.regular_price)
+                if result.available and result.icann_fee:
+                    item["icann_fee"] = float(result.icann_fee)
+                if not result.available:
+                    item["for_sale"] = for_sale_json(sales[result.domain])
                 data.append(item)
 
-            headers = ["domain", "available", "price"]
+            headers = [
+                "domain",
+                "unicode",
+                "available",
+                "price",
+                "regular_price",
+                "icann_fee",
+                "for_sale",
+            ]
             output_formatter(data, config.output_format, headers)
+
+    except NamecheapError as e:
+        console.print(f"[red]❌ Error: {e}[/red]")
+        sys.exit(1)
+
+
+CONTACT_PROMPTS = [
+    ("first_name", "First name"),
+    ("last_name", "Last name"),
+    ("address1", "Street address"),
+    ("city", "City"),
+    ("state_province", "State/Province"),
+    ("postal_code", "Postal code"),
+    ("country", "Country code (e.g. US)"),
+    ("phone", "Phone (+NN.NNNNNNNNNN)"),
+    ("email", "Email"),
+]
+
+
+@domain_group.command("register")
+@click.argument("domain")
+@click.option("--years", type=int, default=1, help="Registration period in years")
+@click.option(
+    "--contacts-from",
+    "contacts_from",
+    metavar="DOMAIN",
+    help="Copy the registrant contact from a domain already in the account",
+)
+@click.option(
+    "--nameserver",
+    "-n",
+    "nameservers",
+    multiple=True,
+    help="Custom nameserver (repeat per NS; default: Namecheap BasicDNS)",
+)
+@click.option("--no-privacy", is_flag=True, help="Skip free WhoisGuard privacy")
+@click.option("--yes", "-y", is_flag=True, help="Skip confirmation")
+@pass_config
+def domain_register(
+    config: Config,
+    domain: str,
+    years: int,
+    contacts_from: str | None,
+    nameservers: tuple[str, ...],
+    no_privacy: bool,
+    yes: bool,
+) -> None:
+    """Register a new domain. Charges the account balance.
+
+    Contact info comes from an existing domain (--contacts-from) or an
+    interactive prompt. Auto-renew cannot be set via the API; enable it in
+    the Namecheap dashboard after registration if wanted.
+
+    Example:
+        namecheap-cli domain register example.com --contacts-from other.com
+    """
+    nc = config.init_client()
+
+    try:
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            transient=True,
+        ) as progress:
+            progress.add_task(f"Checking {domain}...", total=None)
+            check = nc.domains.check(domain, include_pricing=True)[0]
+
+        if not check.available:
+            console.print(f"[red]❌ {domain} is taken[/red]")
+            sys.exit(1)
+
+        # Contact: copy from an existing domain, or ask
+        if contacts_from:
+            with Progress(
+                SpinnerColumn(),
+                TextColumn("[progress.description]{task.description}"),
+                transient=True,
+            ) as progress:
+                progress.add_task(
+                    f"Copying contact from {contacts_from}...", total=None
+                )
+                contact = nc.domains.get_contacts(contacts_from).registrant
+        else:
+            if not sys.stdin.isatty():
+                console.print(
+                    "[red]❌ No terminal to prompt for contact info. "
+                    "Pass --contacts-from <existing-domain>.[/red]"
+                )
+                sys.exit(1)
+            console.print(
+                "[dim]Registrant contact (tip: --contacts-from copies it from "
+                "a domain you already own)[/dim]"
+            )
+            contact = Contact(
+                **{field: Prompt.ask(label) for field, label in CONTACT_PROMPTS}
+            )
+
+        # Money: exact multi-year total from the pricing API, renewal rate,
+        # balance. Registration pricing at duration N is the cumulative total.
+        tld = split_domain(domain).suffix
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            transient=True,
+        ) as progress:
+            progress.add_task("Getting pricing and balance...", total=None)
+            register_prices = (
+                nc.users.get_pricing("DOMAIN", action="REGISTER", product_name=tld)
+                .get("REGISTER", {})
+                .get(tld, [])
+            )
+            renew_prices = (
+                nc.users.get_pricing("DOMAIN", action="RENEW", product_name=tld)
+                .get("RENEW", {})
+                .get(tld, [])
+            )
+            bal = nc.users.get_balances()
+
+        first_year = check.price or next(
+            (p.price for p in register_prices if p.duration == 1), None
+        )
+        assert first_year is not None, f"No price found for {domain}"
+
+        total = next((p.price for p in register_prices if p.duration == years), None)
+        if check.premium or total is None:
+            total = first_year * years
+
+        icann_total = (check.icann_fee or 0) * years
+        total += icann_total
+        renew_price = next((p.price for p in renew_prices if p.duration == 1), None)
+
+        console.print(f"\n[bold cyan]Registering {domain}[/bold cyan]\n")
+        if check.premium:
+            console.print("[yellow]⚠️  Premium domain[/yellow]")
+        console.print(f"[bold]Years:[/bold] {years}")
+        console.print(
+            f"[bold]Price:[/bold] ${first_year:.2f} first year"
+            + (
+                f" [dim](regular ${check.regular_price:.2f}/yr)[/dim]"
+                if check.regular_price and check.regular_price != first_year
+                else ""
+            )
+        )
+        if renew_price is not None:
+            console.print(f"[bold]Renews at:[/bold] ${renew_price:.2f}/yr")
+        if icann_total:
+            console.print(f"[bold]ICANN fee:[/bold] ${icann_total:.2f}")
+        console.print(f"[bold]Total:[/bold] ${total:.2f}")
+        console.print(
+            f"[bold]Privacy:[/bold] "
+            f"{'✗ disabled' if no_privacy else '✓ free WhoisGuard'}"
+        )
+        console.print(
+            f"[bold]Contact:[/bold] {contact.first_name} {contact.last_name} "
+            f"<{contact.email}>"
+            + (f" [dim](from {contacts_from})[/dim]" if contacts_from else "")
+        )
+        if nameservers:
+            console.print(f"[bold]Nameservers:[/bold] {', '.join(nameservers)}")
+        console.print(
+            f"[bold]Balance:[/bold] {bal.available_balance} {bal.currency} available\n"
+        )
+
+        if total > bal.available_balance:
+            console.print(
+                f"[red]❌ Insufficient balance: need ${total:.2f}, "
+                f"have {bal.available_balance} {bal.currency}. "
+                "Top up at namecheap.com → Account → Top Up.[/red]"
+            )
+            sys.exit(1)
+
+        # Real money: only an explicit --yes skips this, never --quiet
+        if not yes and not Confirm.ask(
+            f"Register {domain} for ${total:.2f}?", default=False
+        ):
+            console.print("[yellow]Cancelled[/yellow]")
+            return
+
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            transient=True,
+        ) as progress:
+            progress.add_task(f"Registering {domain}...", total=None)
+            result = nc.domains.register(
+                domain,
+                years=years,
+                contact=contact,
+                nameservers=list(nameservers) or None,
+                whois_protection=not no_privacy,
+            )
+
+        registered = str(result.get("@Registered", "")).lower() == "true"
+        if not registered:
+            console.print(f"[red]❌ Registration failed: {result}[/red]")
+            sys.exit(1)
+
+        if config.output_format == "table":
+            console.print(f"[green]✅ Registered {domain}![/green]")
+            console.print(f"  Charged: ${result.get('@ChargedAmount')}")
+            console.print(f"  Order ID: {result.get('@OrderID')}")
+            console.print(f"  Transaction ID: {result.get('@TransactionID')}")
+            if str(result.get("@NonRealTimeDomain", "")).lower() == "true":
+                console.print(
+                    "[yellow]  Note: registration is queued at the registry "
+                    "and may take a while to complete.[/yellow]"
+                )
+        else:
+            output_formatter(
+                {k.lstrip("@"): v for k, v in result.items()}, config.output_format
+            )
 
     except NamecheapError as e:
         console.print(f"[red]❌ Error: {e}[/red]")
@@ -392,15 +709,11 @@ def nameservers_set(
                 f"{'Resetting' if reset else 'Setting'} nameservers for {domain}...",
                 total=None,
             )
-            success = nc.domains.set_nameservers(
-                domain, list(nameservers), reset=reset
-            )
+            success = nc.domains.set_nameservers(domain, list(nameservers), reset=reset)
 
         if success:
             if reset:
-                console.print(
-                    f"[green]✅ Reset {domain} to Namecheap BasicDNS[/green]"
-                )
+                console.print(f"[green]✅ Reset {domain} to Namecheap BasicDNS[/green]")
             else:
                 console.print(
                     f"[green]✅ Set nameservers for {domain}: "
@@ -427,57 +740,34 @@ def domain_info(config: Config, domain: str) -> None:
     nc = config.init_client()
 
     try:
-        domains = nc.domains.list()
-        domain_obj = next((d for d in domains if d.name == domain), None)
-
-        if not domain_obj:
-            console.print(f"[red]❌ Domain {domain} not found in your account[/red]")
-            sys.exit(1)
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            transient=True,
+        ) as progress:
+            progress.add_task(f"Getting info for {domain}...", total=None)
+            info = nc.domains.get_info(domain)
 
         if config.output_format == "table":
-            console.print(f"\n[bold cyan]Domain Information: {domain}[/bold cyan]\n")
-            console.print(
-                f"[bold]Status:[/bold] "
-                f"{'Active' if not domain_obj.is_expired else '[red]Expired[/red]'}"
-            )
-            console.print(
-                f"[bold]Created:[/bold] {domain_obj.created.strftime('%Y-%m-%d')}"
-            )
-            console.print(
-                f"[bold]Expires:[/bold] {domain_obj.expires.strftime('%Y-%m-%d')}"
-            )
-            console.print(
-                f"[bold]Auto-Renew:[/bold] {'✓ Enabled' if domain_obj.auto_renew else '✗ Disabled'}"
-            )
-            console.print(
-                f"[bold]Locked:[/bold] {'🔒 Yes' if domain_obj.is_locked else '🔓 No'}"
-            )
+            shown = info.unicode_domain
+            if shown != info.domain:
+                shown = f"{shown} [dim]({info.domain})[/dim]"
+            console.print(f"\n[bold cyan]Domain Information: {shown}[/bold cyan]\n")
+            console.print(f"[bold]Status:[/bold] {info.status}")
+            console.print(f"[bold]Owner:[/bold] {info.owner}")
+            if info.created:
+                console.print(f"[bold]Created:[/bold] {info.created}")
+            if info.expires:
+                console.print(f"[bold]Expires:[/bold] {info.expires}")
+            console.print(f"[bold]Premium:[/bold] {'Yes' if info.is_premium else 'No'}")
             console.print(
                 f"[bold]WHOIS Guard:[/bold] "
-                f"{'✓ Enabled' if domain_obj.whois_guard else '✗ Disabled'}"
+                f"{'✓ Enabled' if info.whoisguard_enabled else '✗ Disabled'}"
             )
-
-            # Calculate days until expiration
-            days_left = (domain_obj.expires - datetime.now()).days
-            if days_left < 30:
-                console.print(
-                    f"\n⚠️  [yellow]Domain expires in {days_left} days![/yellow]"
-                )
-            elif days_left < 60:
-                console.print(f"\n📅 Domain expires in {days_left} days")
-
+            if info.dns_provider:
+                console.print(f"[bold]DNS Provider:[/bold] {info.dns_provider}")
         else:
-            data = {
-                "domain": domain_obj.name,
-                "status": "active" if not domain_obj.is_expired else "expired",
-                "created": domain_obj.created.isoformat(),
-                "expires": domain_obj.expires.isoformat(),
-                "auto_renew": domain_obj.auto_renew,
-                "locked": domain_obj.is_locked,
-                "whois_guard": domain_obj.whois_guard,
-                "days_until_expiration": (domain_obj.expires - datetime.now()).days,
-            }
-            output_formatter(data, config.output_format)
+            output_formatter(info.model_dump(), config.output_format)
 
     except NamecheapError as e:
         console.print(f"[red]❌ Error: {e}[/red]")
@@ -572,7 +862,12 @@ def dns_list(config: Config, domain: str, type: str | None, name: str | None) ->
 )
 @click.argument("name")
 @click.argument("value")
-@click.option("--ttl", type=int, default=1800, help="TTL in seconds (60-86400)")
+@click.option(
+    "--ttl",
+    type=int,
+    default=1799,
+    help="TTL in seconds (60-86400, default: 1799 = Automatic)",
+)
 @click.option("--priority", type=int, help="Priority (required for MX records)")
 @pass_config
 def dns_add(
@@ -755,6 +1050,131 @@ def dns_delete(
         sys.exit(1)
 
 
+@dns_group.command("nameservers")
+@click.argument("domain")
+@pass_config
+def dns_nameservers(config: Config, domain: str) -> None:
+    """Show current nameserver configuration for a domain."""
+    nc = config.init_client()
+
+    try:
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            transient=True,
+        ) as progress:
+            progress.add_task(f"Getting nameserver info for {domain}...", total=None)
+            ns = nc.dns.get_nameservers(domain)
+
+        if config.output_format == "table":
+            console.print(f"\n[bold cyan]Nameservers for {domain}[/bold cyan]\n")
+
+            if ns.is_default:
+                console.print("[green]Using Namecheap BasicDNS[/green]")
+            else:
+                console.print("[yellow]Using custom nameservers:[/yellow]")
+            for nameserver in ns.nameservers:
+                console.print(f"  • {nameserver}")
+        else:
+            output_formatter(ns.model_dump(), config.output_format)
+
+    except NamecheapError as e:
+        console.print(f"[red]❌ Error: {e}[/red]")
+        sys.exit(1)
+
+
+@dns_group.command("set-nameservers")
+@click.argument("domain")
+@click.argument("nameservers", nargs=-1, required=True)
+@click.option("--yes", "-y", is_flag=True, help="Skip confirmation")
+@pass_config
+def dns_set_nameservers(
+    config: Config, domain: str, nameservers: tuple[str, ...], yes: bool
+) -> None:
+    """Set custom nameservers for a domain.
+
+    This switches the domain from Namecheap's default DNS to custom nameservers.
+
+    Example:
+        namecheap-cli dns set-nameservers example.com ns1.route53.com ns2.route53.com
+    """
+    nc = config.init_client()
+
+    try:
+        if not yes and not config.quiet:
+            console.print(
+                f"\n[yellow]Setting custom nameservers for {domain}:[/yellow]"
+            )
+            for ns in nameservers:
+                console.print(f"  • {ns}")
+            console.print()
+
+            if not Confirm.ask("Continue?", default=True):
+                console.print("[yellow]Cancelled[/yellow]")
+                return
+
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            transient=True,
+        ) as progress:
+            progress.add_task(f"Setting nameservers for {domain}...", total=None)
+            success = nc.dns.set_custom_nameservers(domain, list(nameservers))
+
+        if success:
+            console.print(f"[green]✅ Custom nameservers set for {domain}[/green]")
+            if not config.quiet:
+                console.print(
+                    "\n[dim]Note: DNS propagation may take up to 48 hours.[/dim]"
+                )
+        else:
+            console.print("[red]❌ Failed to set nameservers[/red]")
+            sys.exit(1)
+
+    except NamecheapError as e:
+        console.print(f"[red]❌ Error: {e}[/red]")
+        sys.exit(1)
+
+
+@dns_group.command("reset-nameservers")
+@click.argument("domain")
+@click.option("--yes", "-y", is_flag=True, help="Skip confirmation")
+@pass_config
+def dns_reset_nameservers(config: Config, domain: str, yes: bool) -> None:
+    """Reset domain to use Namecheap's default nameservers.
+
+    This switches the domain back to Namecheap BasicDNS from custom nameservers.
+    """
+    nc = config.init_client()
+
+    try:
+        if not yes and not config.quiet:
+            console.print(
+                f"\n[yellow]This will reset {domain} to Namecheap's default DNS.[/yellow]"
+            )
+            if not Confirm.ask("Continue?", default=True):
+                console.print("[yellow]Cancelled[/yellow]")
+                return
+
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            transient=True,
+        ) as progress:
+            progress.add_task(f"Resetting nameservers for {domain}...", total=None)
+            success = nc.dns.set_default_nameservers(domain)
+
+        if success:
+            console.print(f"[green]✅ {domain} is now using Namecheap BasicDNS[/green]")
+        else:
+            console.print("[red]❌ Failed to reset nameservers[/red]")
+            sys.exit(1)
+
+    except NamecheapError as e:
+        console.print(f"[red]❌ Error: {e}[/red]")
+        sys.exit(1)
+
+
 @dns_group.command("export")
 @click.argument("domain")
 @click.option(
@@ -836,6 +1256,640 @@ def dns_export(config: Config, domain: str, format: str, output) -> None:
         sys.exit(1)
 
 
+@dns_group.command("email-forwarding")
+@click.argument("domain")
+@pass_config
+def dns_email_forwarding(config: Config, domain: str) -> None:
+    """Show email forwarding rules for a domain."""
+    nc = config.init_client()
+
+    try:
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            transient=True,
+        ) as progress:
+            progress.add_task(f"Getting email forwarding for {domain}...", total=None)
+            rules = nc.dns.get_email_forwarding(domain)
+
+        if config.output_format == "table":
+            if not rules:
+                console.print(
+                    f"\n[yellow]No email forwarding rules for {domain}[/yellow]"
+                )
+                return
+
+            table = Table(title=f"Email Forwarding for {domain}")
+            table.add_column("Mailbox", style="cyan")
+            table.add_column("Forwards To", style="green")
+
+            for rule in rules:
+                table.add_row(f"{rule.mailbox}@{domain}", rule.forward_to)
+
+            console.print(table)
+        else:
+            output_formatter([r.model_dump() for r in rules], config.output_format)
+
+    except NamecheapError as e:
+        console.print(f"[red]❌ Error: {e}[/red]")
+        sys.exit(1)
+
+
+@dns_group.command("set-email-forwarding")
+@click.argument("domain")
+@click.argument("rules", nargs=-1, required=True)
+@click.option("--yes", "-y", is_flag=True, help="Skip confirmation")
+@pass_config
+def dns_set_email_forwarding(
+    config: Config, domain: str, rules: tuple[str, ...], yes: bool
+) -> None:
+    """Set email forwarding rules. Replaces all existing rules.
+
+    Rules are in mailbox:forward_to format. The rules being replaced are
+    printed to stderr first. To remove them all: clear-email-forwarding.
+
+    Example:
+        namecheap-cli dns set-email-forwarding example.com info:me@gmail.com support:help@gmail.com
+    """
+    parsed = []
+    for rule in rules:
+        if ":" not in rule:
+            raise click.BadParameter(
+                f"'{rule}' is not mailbox:forward_to", param_hint="RULES"
+            )
+        mailbox, forward_to = rule.split(":", 1)
+        parsed.append({"mailbox": mailbox, "forward_to": forward_to})
+
+    _replace_email_forwarding(config, domain, parsed, yes)
+
+
+@dns_group.command("clear-email-forwarding")
+@click.argument("domain")
+@click.option("--yes", "-y", is_flag=True, help="Skip confirmation")
+@pass_config
+def dns_clear_email_forwarding(config: Config, domain: str, yes: bool) -> None:
+    """Remove every email forwarding rule from a domain.
+
+    Example:
+        namecheap-cli dns clear-email-forwarding example.com
+    """
+    _replace_email_forwarding(config, domain, [], yes)
+
+
+def _replace_email_forwarding(
+    config: Config, domain: str, rules: list[dict[str, str]], yes: bool
+) -> None:
+    """Replace a domain's forwarding rules with `rules` (empty = remove all).
+
+    The rules being replaced are read first and always written to stderr, even
+    with --yes or --quiet: that line is the only record of what to restore.
+    """
+    nc = config.init_client()
+
+    try:
+        previous = nc.dns.get_email_forwarding(domain)
+        click.echo(
+            f"{domain} forwarding before: "
+            + (
+                " ".join(f"{r.mailbox}:{r.forward_to}" for r in previous)
+                or "(no rules)"
+            ),
+            err=True,
+        )
+
+        if not yes and not config.quiet:
+            console.print(f"\n[yellow]Email forwarding for {domain}:[/yellow]")
+            for r in previous:
+                console.print(f"  [red]- {r.mailbox}@{domain} → {r.forward_to}[/red]")
+            for p in rules:
+                console.print(
+                    f"  [green]+ {p['mailbox']}@{domain} → {p['forward_to']}[/green]"
+                )
+            if not rules:
+                console.print("  [yellow](no rules afterwards)[/yellow]")
+            console.print()
+
+            if not Confirm.ask("Continue?", default=not previous or bool(rules)):
+                console.print("[yellow]Cancelled[/yellow]")
+                return
+
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            transient=True,
+        ) as progress:
+            progress.add_task(f"Setting email forwarding for {domain}...", total=None)
+            success = (
+                nc.dns.set_email_forwarding(domain, rules)
+                if rules
+                else nc.dns.clear_email_forwarding(domain)
+            )
+
+        if success:
+            console.print("[green]✅ Email forwarding updated successfully![/green]")
+        else:
+            console.print("[red]❌ Failed to update email forwarding[/red]")
+            sys.exit(1)
+
+    except NamecheapError as e:
+        console.print(f"[red]❌ Error: {e}[/red]")
+        sys.exit(1)
+
+
+@domain_group.command("contacts")
+@click.argument("domain")
+@pass_config
+def domain_contacts(config: Config, domain: str) -> None:
+    """Show contact information for a domain."""
+    nc = config.init_client()
+
+    try:
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            transient=True,
+        ) as progress:
+            progress.add_task(f"Getting contacts for {domain}...", total=None)
+            contacts = nc.domains.get_contacts(domain)
+
+        if config.output_format == "table":
+            for role, contact in [
+                ("Registrant", contacts.registrant),
+                ("Tech", contacts.tech),
+                ("Admin", contacts.admin),
+                ("Billing", contacts.aux_billing),
+            ]:
+                console.print(f"\n[bold cyan]{role}[/bold cyan]")
+                console.print(f"  {contact.first_name} {contact.last_name}")
+                if contact.organization:
+                    console.print(f"  {contact.organization}")
+                console.print(f"  {contact.email}")
+                console.print(f"  {contact.phone}")
+                console.print(f"  {contact.address1}")
+                if contact.address2:
+                    console.print(f"  {contact.address2}")
+                console.print(
+                    f"  {contact.city}, {contact.state_province} {contact.postal_code}"
+                )
+                console.print(f"  {contact.country}")
+        else:
+            output_formatter(contacts.model_dump(), config.output_format)
+
+    except NamecheapError as e:
+        console.print(f"[red]❌ Error: {e}[/red]")
+        sys.exit(1)
+
+
+@domain_group.command("tlds")
+@click.option("--registerable", is_flag=True, help="Only show API-registerable TLDs")
+@click.option(
+    "--type",
+    "-t",
+    "tld_type",
+    type=click.Choice(["GTLD", "CCTLD"], case_sensitive=False),
+    help="Filter by TLD type",
+)
+@pass_config
+def domain_tlds(config: Config, registerable: bool, tld_type: str | None) -> None:
+    """List all supported TLDs."""
+    nc = config.init_client()
+
+    try:
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            transient=True,
+        ) as progress:
+            progress.add_task("Loading TLD list...", total=None)
+            tlds = nc.domains.get_tld_list()
+
+        if registerable:
+            tlds = [t for t in tlds if t.is_api_registerable]
+        if tld_type:
+            tlds = [t for t in tlds if t.type.upper() == tld_type.upper()]
+
+        tlds.sort(key=lambda t: t.name)
+
+        if config.output_format == "table":
+            table = Table(title=f"Supported TLDs ({len(tlds)} total)")
+            table.add_column("TLD", style="cyan")
+            table.add_column("Type", style="magenta")
+            table.add_column("Description", style="dim")
+            table.add_column("Register", justify="center")
+            table.add_column("Renew", justify="center")
+            table.add_column("Transfer", justify="center")
+            table.add_column("Years", justify="center")
+
+            for t in tlds:
+                table.add_row(
+                    f".{t.name}",
+                    t.type,
+                    t.description[:40] if t.description else "",
+                    "✓" if t.is_api_registerable else "✗",
+                    "✓" if t.is_api_renewable else "✗",
+                    "✓" if t.is_api_transferable else "✗",
+                    f"{t.min_register_years}-{t.max_register_years}",
+                )
+
+            console.print(table)
+        else:
+            data = [
+                {
+                    "tld": t.name,
+                    "type": t.type,
+                    "description": t.description,
+                    "api_registerable": t.is_api_registerable,
+                    "api_renewable": t.is_api_renewable,
+                    "api_transferable": t.is_api_transferable,
+                }
+                for t in tlds
+            ]
+            output_formatter(data, config.output_format)
+
+    except NamecheapError as e:
+        console.print(f"[red]❌ Error: {e}[/red]")
+        sys.exit(1)
+
+
+@cli.group("for-sale")
+def for_sale_group() -> None:
+    """Advertise domains for sale, or read who does (RFC 10023 _for-sale)."""
+    pass
+
+
+@for_sale_group.command("show")
+@click.argument("domains", nargs=-1, required=True)
+@pass_config
+def for_sale_show(config: Config, domains: tuple[str, ...]) -> None:
+    """Read the _for-sale records of any domains, yours or not.
+
+    Plain DNS: needs no Namecheap credentials.
+
+    Example:
+        namecheap-cli for-sale show example.com example.net
+    """
+    sales = for_sale_many(list(domains))
+
+    if config.output_format != "table":
+        output_formatter(
+            [{"domain": d, "for_sale": for_sale_json(sales[d])} for d in domains],
+            config.output_format,
+            ["domain", "for_sale"],
+        )
+        return
+
+    table = Table(title="_for-sale (RFC 10023)")
+    table.add_column("Domain", style="cyan")
+    table.add_column("Tag")
+    table.add_column("Value", overflow="fold")
+    for d in domains:
+        sale = sales[d]
+        if not isinstance(sale, ForSale):
+            table.add_row(
+                escape(d), "", for_sale_cell(sale) or "[dim]not for sale[/dim]"
+            )
+            continue
+        rows = (
+            [("fval", f"{escape(str(p))}*") for p in sale.fval]
+            + [("furi", escape(u)) for u in sale.furi]
+            + [("ftxt", escape(t)) for t in sale.ftxt]
+            + [("fcod", escape(c)) for c in sale.fcod]
+            + [("[yellow]invalid[/yellow]", escape(r)) for r in sale.invalid]
+            + [("[dim]note[/dim]", f"[dim]{escape(n)}[/dim]") for n in sale.notes]
+        )
+        for i, (tag, value) in enumerate(rows or [("", "")]):
+            table.add_row(escape(d) if i == 0 else "", tag, value)
+    console.print(table)
+    priced = any(isinstance(s, ForSale) and s.fval for s in sales.values())
+    if priced and not config.quiet:
+        console.print(f"[dim]{PRICE_DISCLAIMER}[/dim]")
+    if any(isinstance(s, DNSException) for s in sales.values()):
+        sys.exit(1)
+
+
+def _for_sale_breadcrumb(domain: str, previous: list[DNSRecord]) -> None:
+    """The records a write replaced, always on stderr: what to restore from."""
+    click.echo(
+        f"{domain} _for-sale before: "
+        + (" | ".join(r.value for r in previous) or "(no records)"),
+        err=True,
+    )
+
+
+@for_sale_group.command("set")
+@click.argument("domain")
+@click.option("--furi", multiple=True, help="Contact URI (https:, mailto:, tel:)")
+@click.option("--fval", multiple=True, help="Asking price, e.g. USD12500 (public)")
+@click.option("--ftxt", multiple=True, help="Short human text")
+@click.option("--fcod", multiple=True, help="Code for cooperating parties")
+@click.option("--ttl", type=int, default=1799, help="At most 3600 (RFC 10023)")
+@click.option("--yes", "-y", is_flag=True, help="Skip confirmation")
+@pass_config
+def for_sale_set(
+    config: Config,
+    domain: str,
+    furi: tuple[str, ...],
+    fval: tuple[str, ...],
+    ftxt: tuple[str, ...],
+    fcod: tuple[str, ...],
+    ttl: int,
+    yes: bool,
+) -> None:
+    """Advertise DOMAIN as for sale: replace its _for-sale records.
+
+    One record per value; every other DNS record stays. Needs Namecheap
+    BasicDNS. The rules being replaced are printed to stderr first.
+
+    Example:
+        namecheap-cli for-sale set example.com --furi mailto:sales@example.com
+    """
+    try:
+        values = for_sale_records(furi=furi, fval=fval, ftxt=ftxt, fcod=fcod)
+    except ValueError as e:
+        raise click.BadParameter(str(e)) from e
+
+    nc = config.init_client()
+    if not yes and not config.quiet:
+        console.print(f"\n[yellow]_for-sale.{escape(domain)} will hold:[/yellow]")
+        for v in values:
+            console.print(f"  [green]+ {escape(v)}[/green]")
+        if fval:
+            console.print(
+                "  [yellow]fval publishes your asking price to anyone, and anchors"
+                " every negotiation that follows[/yellow]"
+            )
+        if not furi:
+            console.print(
+                "  [yellow]no furi: buyers get no way to reach you from the"
+                " record itself[/yellow]"
+            )
+        console.print()
+        if not Confirm.ask("Continue?", default=True):
+            console.print("[yellow]Cancelled[/yellow]")
+            return
+
+    try:
+        previous = nc.dns.set_for_sale(
+            domain, furi=furi, fval=list(fval), ftxt=ftxt, fcod=fcod, ttl=ttl
+        )
+    except NamecheapError as e:
+        console.print(f"[red]❌ Error: {e}[/red]")
+        sys.exit(1)
+    _for_sale_breadcrumb(domain, previous)
+    console.print(
+        f"[green]✅ {escape(domain)} is advertised for sale[/green]"
+        f" [dim](DNS shows it within {ttl}s: namecheap-cli for-sale show {escape(domain)})[/dim]"
+    )
+
+
+@for_sale_group.command("clear")
+@click.argument("domain")
+@click.option("--yes", "-y", is_flag=True, help="Skip confirmation")
+@pass_config
+def for_sale_clear(config: Config, domain: str, yes: bool) -> None:
+    """Withdraw DOMAIN from sale: delete its _for-sale records.
+
+    Example:
+        namecheap-cli for-sale clear example.com
+    """
+    nc = config.init_client()
+    if (
+        not yes
+        and not config.quiet
+        and not Confirm.ask(f"Delete every _for-sale record of {domain}?", default=True)
+    ):
+        console.print("[yellow]Cancelled[/yellow]")
+        return
+    try:
+        previous = nc.dns.clear_for_sale(domain)
+    except NamecheapError as e:
+        console.print(f"[red]❌ Error: {e}[/red]")
+        sys.exit(1)
+    _for_sale_breadcrumb(domain, previous)
+    if previous:
+        console.print(
+            f"[green]✅ {escape(domain)} is no longer advertised for sale[/green]"
+        )
+    else:
+        console.print(f"[yellow]{escape(domain)} had no _for-sale records[/yellow]")
+
+
+@cli.group("privacy")
+def privacy_group() -> None:
+    """Domain privacy (WhoisGuard) management."""
+    pass
+
+
+@privacy_group.command("list")
+@click.option(
+    "--type",
+    "-t",
+    "list_type",
+    type=click.Choice(["ALL", "ALLOTED", "FREE", "DISCARD"], case_sensitive=False),
+    default="ALL",
+    help="Filter by subscription type",
+)
+@pass_config
+def privacy_list(config: Config, list_type: str) -> None:
+    """List WhoisGuard subscriptions."""
+    nc = config.init_client()
+
+    try:
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            transient=True,
+        ) as progress:
+            progress.add_task("Loading WhoisGuard subscriptions...", total=None)
+            entries = nc.whoisguard.get_list(list_type=list_type.upper())
+
+        if config.output_format == "table":
+            table = Table(title=f"WhoisGuard Subscriptions ({len(entries)} total)")
+            table.add_column("ID", style="dim")
+            table.add_column("Domain", style="cyan")
+            table.add_column("Status", style="green")
+            table.add_column("Created", style="yellow")
+            table.add_column("Expires", style="yellow")
+
+            for e in entries:
+                status_style = (
+                    "green" if e.status.lower() in ("enabled", "alloted") else "yellow"
+                )
+                table.add_row(
+                    str(e.id),
+                    e.domain or "[dim]unassigned[/dim]",
+                    f"[{status_style}]{e.status}[/{status_style}]",
+                    e.created,
+                    e.expires,
+                )
+
+            console.print(table)
+        else:
+            output_formatter([e.model_dump() for e in entries], config.output_format)
+
+    except NamecheapError as e:
+        console.print(f"[red]❌ Error: {e}[/red]")
+        sys.exit(1)
+
+
+@privacy_group.command("enable")
+@click.argument("domain")
+@click.argument("email")
+@pass_config
+def privacy_enable(config: Config, domain: str, email: str) -> None:
+    """Enable domain privacy. Requires forwarding email.
+
+    Example:
+        namecheap-cli privacy enable example.com me@gmail.com
+    """
+    nc = config.init_client()
+
+    try:
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            transient=True,
+        ) as progress:
+            progress.add_task(f"Enabling privacy for {domain}...", total=None)
+            success = nc.whoisguard.enable(domain, email)
+
+        if success:
+            console.print(f"[green]✅ Privacy enabled for {domain}[/green]")
+            console.print(f"[dim]Forwarding email: {email}[/dim]")
+        else:
+            console.print("[red]❌ Failed to enable privacy[/red]")
+            sys.exit(1)
+
+    except ValueError as e:
+        console.print(f"[red]❌ {e}[/red]")
+        sys.exit(1)
+    except NamecheapError as e:
+        console.print(f"[red]❌ Error: {e}[/red]")
+        sys.exit(1)
+
+
+@privacy_group.command("disable")
+@click.argument("domain")
+@click.option("--yes", "-y", is_flag=True, help="Skip confirmation")
+@pass_config
+def privacy_disable(config: Config, domain: str, yes: bool) -> None:
+    """Disable domain privacy.
+
+    Example:
+        namecheap-cli privacy disable example.com
+    """
+    nc = config.init_client()
+
+    try:
+        if not yes and not config.quiet:
+            console.print(
+                f"\n[yellow]This will expose your WHOIS information for {domain}.[/yellow]"
+            )
+            if not Confirm.ask("Continue?", default=False):
+                console.print("[yellow]Cancelled[/yellow]")
+                return
+
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            transient=True,
+        ) as progress:
+            progress.add_task(f"Disabling privacy for {domain}...", total=None)
+            success = nc.whoisguard.disable(domain)
+
+        if success:
+            console.print(f"[green]✅ Privacy disabled for {domain}[/green]")
+        else:
+            console.print("[red]❌ Failed to disable privacy[/red]")
+            sys.exit(1)
+
+    except ValueError as e:
+        console.print(f"[red]❌ {e}[/red]")
+        sys.exit(1)
+    except NamecheapError as e:
+        console.print(f"[red]❌ Error: {e}[/red]")
+        sys.exit(1)
+
+
+@privacy_group.command("renew")
+@click.argument("domain")
+@click.option("--years", "-y", type=int, default=1, help="Years to renew (1-9)")
+@click.option("--yes", is_flag=True, help="Skip confirmation")
+@pass_config
+def privacy_renew(config: Config, domain: str, years: int, yes: bool) -> None:
+    """Renew domain privacy subscription.
+
+    Example:
+        namecheap-cli privacy renew example.com --years 2
+    """
+    nc = config.init_client()
+
+    try:
+        if not yes and not config.quiet:
+            console.print(
+                f"\n[yellow]Renewing WhoisGuard for {domain} ({years} year{'s' if years > 1 else ''}).[/yellow]"
+            )
+            if not Confirm.ask("Continue?", default=True):
+                console.print("[yellow]Cancelled[/yellow]")
+                return
+
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            transient=True,
+        ) as progress:
+            progress.add_task(f"Renewing privacy for {domain}...", total=None)
+            result = nc.whoisguard.renew(domain, years=years)
+
+        if result["is_renewed"]:
+            console.print(f"[green]✅ Privacy renewed for {domain}[/green]")
+            console.print(f"[dim]Charged: {result['charged_amount']}[/dim]")
+        else:
+            console.print("[red]❌ Failed to renew privacy[/red]")
+            sys.exit(1)
+
+    except ValueError as e:
+        console.print(f"[red]❌ {e}[/red]")
+        sys.exit(1)
+    except NamecheapError as e:
+        console.print(f"[red]❌ Error: {e}[/red]")
+        sys.exit(1)
+
+
+@privacy_group.command("change-email")
+@click.argument("domain")
+@pass_config
+def privacy_change_email(config: Config, domain: str) -> None:
+    """Rotate the privacy forwarding email address.
+
+    Namecheap generates a new masked email automatically.
+
+    Example:
+        namecheap-cli privacy change-email example.com
+    """
+    nc = config.init_client()
+
+    try:
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            transient=True,
+        ) as progress:
+            progress.add_task(f"Rotating privacy email for {domain}...", total=None)
+            result = nc.whoisguard.change_email(domain)
+
+        console.print(f"[green]✅ Privacy email rotated for {domain}[/green]")
+        console.print(f"  New: {result['new_email']}")
+        console.print(f"  Old: {result['old_email']}")
+
+    except ValueError as e:
+        console.print(f"[red]❌ {e}[/red]")
+        sys.exit(1)
+    except NamecheapError as e:
+        console.print(f"[red]❌ Error: {e}[/red]")
+        sys.exit(1)
+
+
 @cli.group("account")
 def account_group() -> None:
     """Account management commands."""
@@ -846,14 +1900,118 @@ def account_group() -> None:
 @pass_config
 def account_balance(config: Config) -> None:
     """Check account balance."""
-    config.init_client()
+    nc = config.init_client()
 
     try:
-        # This would need to be implemented in the SDK
-        console.print(
-            "[yellow]Account balance check not yet implemented in SDK[/yellow]"
-        )
-        console.print("This feature requires the users.getBalances API method")
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            transient=True,
+        ) as progress:
+            progress.add_task("Getting account balance...", total=None)
+            bal = nc.users.get_balances()
+
+        if config.output_format == "table":
+            table = Table(title="Account Balance")
+            table.add_column("Field", style="cyan")
+            table.add_column("Amount", style="green", justify="right")
+
+            table.add_row(
+                "Available Balance", f"{bal.available_balance} {bal.currency}"
+            )
+            table.add_row("Account Balance", f"{bal.account_balance} {bal.currency}")
+            table.add_row("Earned Amount", f"{bal.earned_amount} {bal.currency}")
+            table.add_row("Withdrawable", f"{bal.withdrawable_amount} {bal.currency}")
+            if bal.funds_required_for_auto_renew > 0:
+                table.add_row(
+                    "Auto-Renew Required",
+                    f"{bal.funds_required_for_auto_renew} {bal.currency}",
+                )
+
+            console.print(table)
+        else:
+            output_formatter(bal.model_dump(mode="json"), config.output_format)
+
+    except NamecheapError as e:
+        console.print(f"[red]❌ Error: {e}[/red]")
+        sys.exit(1)
+
+
+@account_group.command("pricing")
+@click.argument("tld", required=False)
+@click.option(
+    "--action",
+    "-a",
+    type=click.Choice(
+        ["REGISTER", "RENEW", "TRANSFER", "REACTIVATE"], case_sensitive=False
+    ),
+    default="REGISTER",
+    help="Pricing action",
+)
+@pass_config
+def account_pricing(config: Config, tld: str | None, action: str) -> None:
+    """Get domain pricing. Optionally filter by TLD.
+
+    Examples:
+        namecheap-cli account pricing com
+        namecheap-cli account pricing --action RENEW
+        namecheap-cli account pricing io --action REGISTER
+    """
+    nc = config.init_client()
+
+    try:
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            transient=True,
+        ) as progress:
+            progress.add_task("Getting pricing...", total=None)
+            pricing = nc.users.get_pricing(
+                "DOMAIN",
+                action=action.upper(),
+                product_name=tld,
+            )
+
+        action_products = pricing.get(action.upper(), {})
+
+        if config.output_format == "table":
+            if not action_products:
+                console.print("[yellow]No pricing data found[/yellow]")
+                return
+
+            table = Table(title=f"Domain Pricing — {action.upper()}")
+            table.add_column("TLD", style="cyan")
+            table.add_column("Duration", justify="center")
+            table.add_column("Price", style="green", justify="right")
+            table.add_column("Regular", style="dim", justify="right")
+            table.add_column("Your Price", style="yellow", justify="right")
+
+            for product_name, prices in sorted(action_products.items()):
+                for p in prices:
+                    table.add_row(
+                        f".{product_name}",
+                        f"{p.duration} {'year' if p.duration == 1 else 'years'}",
+                        f"${p.price}" if p.price else "-",
+                        f"${p.regular_price}" if p.regular_price else "-",
+                        f"${p.your_price}" if p.your_price else "-",
+                    )
+
+            console.print(table)
+        else:
+            data = []
+            for product_name, prices in action_products.items():
+                for p in prices:
+                    data.append(
+                        {
+                            "tld": product_name,
+                            "duration": p.duration,
+                            "price": str(p.price),
+                            "regular_price": str(p.regular_price),
+                            "your_price": str(p.your_price),
+                            "currency": p.currency,
+                        }
+                    )
+            output_formatter(data, config.output_format)
 
     except NamecheapError as e:
         console.print(f"[red]❌ Error: {e}[/red]")
@@ -891,7 +2049,11 @@ def config_init() -> None:
     api_key = Prompt.ask("API Key", password=True)
     username = Prompt.ask("Username")
     api_user = Prompt.ask("API User", default=username)
-    sandbox = Confirm.ask("Use sandbox API?", default=True)
+    sandbox = Confirm.ask(
+        "Use the sandbox API? (only for a sandbox.namecheap.com account, whose key"
+        " differs from your real one)",
+        default=False,
+    )
 
     # Create config
     config = {
@@ -909,7 +2071,7 @@ def config_init() -> None:
             "color": True,
             "auto_renew": True,
             "whois_privacy": True,
-            "dns_ttl": 1800,
+            "dns_ttl": 1799,
         },
     }
 
@@ -927,6 +2089,89 @@ def config_init() -> None:
     )
     console.print("  • Add more profiles with: nc config add-profile <name>")
     console.print("  • Use a profile with: nc --profile <name> <command>")
+
+
+@cli.group("skill")
+def skill_group() -> None:
+    """Claude Code skill management."""
+    pass
+
+
+SKILL_FRONTMATTER = """\
+---
+name: namecheap-cli
+description: Manage Namecheap domains with the namecheap-cli tool (domain registration, DNS records, nameservers, email forwarding, WhoisGuard privacy, availability checks, pricing, account balance). This skill should be used when the user asks to register or buy a domain, add or change DNS records, point a domain at GitHub Pages, Vercel, or Cloudflare, check or price domains, manage domain privacy, or otherwise operate on their Namecheap account.
+---
+
+"""
+
+
+def _cli_md() -> str:
+    """The canonical CLI guide: package data in the wheel, repo root in dev."""
+    packaged = resources.files("namecheap_cli").joinpath("CLI.md")
+    if packaged.is_file():
+        return packaged.read_text()
+    return (Path(__file__).parents[2] / "CLI.md").read_text()
+
+
+def _reference() -> str:
+    """Render the full command reference from the live click tree."""
+
+    def walk(cmd: click.Command, prog: str):
+        yield prog, cmd
+        if isinstance(cmd, click.Group):
+            for name in sorted(cmd.commands):
+                yield from walk(cmd.commands[name], f"{prog} {name}")
+
+    sections = [
+        "<!-- Generated by `namecheap-cli skill commands`. Do not edit. -->\n\n"
+        "# namecheap-cli command reference\n\n"
+        "Global options go BEFORE the resource: `namecheap-cli -o json domain list`.\n"
+        "Usage guide, safety rules, and workflows: CLI.md.\n"
+    ]
+    for prog, cmd in walk(cli, "namecheap-cli"):
+        ctx = click.Context(cmd, info_name=prog, terminal_width=80)
+        sections.append(f"## `{prog}`\n\n```\n{cmd.get_help(ctx)}\n```\n")
+    return "\n".join(sections)
+
+
+@skill_group.command("commands")
+def skill_commands() -> None:
+    """Print the full command reference as markdown."""
+    click.echo(_reference(), nl=False)
+
+
+@skill_group.command("install")
+@click.option(
+    "--dir",
+    "target_dir",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Install directory (default: ~/.claude/skills/namecheap-cli)",
+)
+def skill_install(target_dir: Path | None) -> None:
+    """Install the Claude Code skill.
+
+    SKILL.md is CLI.md wrapped in skill frontmatter; references/commands.md
+    is generated from this exact CLI version, so neither can drift.
+    """
+    target = target_dir or Path.home() / ".claude" / "skills" / "namecheap-cli"
+    references = target / "references"
+    references.mkdir(parents=True, exist_ok=True)
+
+    body = _cli_md().replace(
+        "(src/namecheap_cli/COMMANDS.md)", "(references/commands.md)"
+    )
+    # Claude Code expands $<digit> and $ARGUMENTS placeholders in skill
+    # bodies at invocation time; escape literal dollars so prices survive.
+    body = re.sub(r"\$(?=\d|ARGUMENTS)", r"\\$", body)
+    (target / "SKILL.md").write_text(SKILL_FRONTMATTER + body)
+    (references / "commands.md").write_text(_reference())
+
+    console.print(f"[green]✅ Skill installed to {target}[/green]")
+    console.print(
+        "[dim]Claude Code picks it up in new sessions. Re-run after upgrading.[/dim]"
+    )
 
 
 @cli.command("completion")
@@ -958,13 +2203,27 @@ def completion(shell: str) -> None:
 
 def main() -> None:
     """Main entry point."""
+    # The SDK does not read .env files. The CLI is an application and does:
+    # load .env from CWD so `cd ~/project && namecheap-cli ...` Just Works.
+    from dotenv import load_dotenv
+
+    load_dotenv(".env")
+
     try:
         cli()
     except KeyboardInterrupt:
         console.print("\n[yellow]Interrupted by user[/yellow]")
         sys.exit(130)
     except Exception as e:
-        if "--debug" in sys.argv:
+        if "socksio" in str(e):
+            console.print(
+                "[red]❌ SOCKS proxy configured (ALL_PROXY) but the 'socksio' package is not installed.[/red]"
+            )
+            console.print(
+                "Install the socks extra: "
+                "[bold cyan]uv tool install --python 3.12 'namecheap-python\\[cli,socks]'[/bold cyan]"
+            )
+        elif "--debug" in sys.argv:
             console.print_exception()
         else:
             console.print(f"[red]❌ Unexpected error: {e}[/red]")

@@ -6,10 +6,17 @@ import builtins
 from decimal import Decimal
 from typing import Any
 
-import tldextract
-
+from namecheap.idn import to_punycode
 from namecheap.logging import logger
-from namecheap.models import Contact, Domain, DomainCheck
+from namecheap.models import (
+    Contact,
+    Domain,
+    DomainCheck,
+    DomainContacts,
+    DomainInfo,
+    Tld,
+)
+from namecheap.tld import split_domain
 
 from .base import BaseAPI
 
@@ -41,7 +48,7 @@ class DomainsAPI(BaseAPI):
             return []
 
         # API accepts comma-separated list
-        domain_list = ",".join(domains)
+        domain_list = ",".join(to_punycode(d) for d in domains)
 
         results = self._request(
             "namecheap.domains.check",
@@ -110,26 +117,146 @@ class DomainsAPI(BaseAPI):
             return [results]
         return results if isinstance(results, list) else []
 
+    def get_info(self, domain: str) -> DomainInfo:
+        """
+        Get detailed information about a domain.
+
+        Args:
+            domain: Domain name
+
+        Returns:
+            DomainInfo with status, whoisguard, DNS provider, etc.
+
+        Examples:
+            >>> info = nc.domains.get_info("example.com")
+            >>> print(f"{info.domain} status={info.status} whoisguard={info.whoisguard_enabled}")
+        """
+        result: Any = self._request(
+            "namecheap.domains.getInfo",
+            {"DomainName": to_punycode(domain)},
+            path="DomainGetInfoResult",
+        )
+
+        assert result, f"API returned empty result for {domain} getInfo"
+
+        # Extract nested fields into flat structure
+        domain_details = result.get("DomainDetails", {})
+        whoisguard = result.get("Whoisguard", {})
+        dns_details = result.get("DnsDetails", {})
+
+        flat = {
+            "@ID": result.get("@ID"),
+            "@DomainName": result.get("@DomainName"),
+            "@OwnerName": result.get("@OwnerName"),
+            "@IsOwner": result.get("@IsOwner"),
+            "@IsPremium": result.get("@IsPremium", "false"),
+            "@Status": result.get("@Status"),
+            "created": domain_details.get("CreatedDate"),
+            "expires": domain_details.get("ExpiredDate"),
+            "whoisguard_enabled": whoisguard.get("@Enabled", "false").lower() == "true"
+            if isinstance(whoisguard, dict)
+            else False,
+            "dns_provider": dns_details.get("@ProviderType")
+            if isinstance(dns_details, dict)
+            else None,
+        }
+
+        return DomainInfo.model_validate(flat)
+
+    def get_contacts(self, domain: str) -> DomainContacts:
+        """
+        Get contact information for a domain.
+
+        Args:
+            domain: Domain name
+
+        Returns:
+            DomainContacts with registrant, tech, admin, and aux_billing contacts
+
+        Examples:
+            >>> contacts = nc.domains.get_contacts("example.com")
+            >>> print(contacts.registrant.email)
+        """
+        result: Any = self._request(
+            "namecheap.domains.getContacts",
+            {"DomainName": to_punycode(domain)},
+            path="DomainContactsResult",
+        )
+
+        assert result, f"API returned empty result for {domain} getContacts"
+
+        def parse_contact(data: dict[str, Any]) -> Contact:
+            return Contact.model_validate(
+                {
+                    "FirstName": data.get("FirstName", ""),
+                    "LastName": data.get("LastName", ""),
+                    "Organization": data.get("Organization"),
+                    "Address1": data.get("Address1", ""),
+                    "Address2": data.get("Address2"),
+                    "City": data.get("City", ""),
+                    "StateProvince": data.get("StateProvince", ""),
+                    "PostalCode": data.get("PostalCode", ""),
+                    "Country": data.get("Country", ""),
+                    "Phone": data.get("Phone", ""),
+                    "EmailAddress": data.get("EmailAddress", ""),
+                }
+            )
+
+        return DomainContacts(
+            registrant=parse_contact(result.get("Registrant", {})),
+            tech=parse_contact(result.get("Tech", {})),
+            admin=parse_contact(result.get("Admin", {})),
+            aux_billing=parse_contact(result.get("AuxBilling", {})),
+        )
+
+    def get_tld_list(self) -> builtins.list[Tld]:
+        """
+        Get list of all TLDs supported by Namecheap.
+
+        NOTE: Cache this response — it rarely changes and the API docs recommend it.
+
+        Returns:
+            List of Tld objects with registration/renewal constraints and capabilities
+
+        Examples:
+            >>> tlds = nc.domains.get_tld_list()
+            >>> registerable = [t for t in tlds if t.is_api_registerable]
+            >>> print(f"{len(registerable)} TLDs available for API registration")
+        """
+        result: Any = self._request(
+            "namecheap.domains.getTldList",
+            path="Tlds",
+        )
+
+        assert result, "API returned empty result for getTldList"
+
+        tlds = result.get("Tld", [])
+        if isinstance(tlds, dict):
+            tlds = [tlds]
+        assert isinstance(tlds, list), f"Unexpected Tld type: {type(tlds)}"
+
+        return [Tld.model_validate(t) for t in tlds]
+
     def register(
         self,
         domain: str,
         *,
         years: int = 1,
-        contact: Contact | dict[str, str] | None = None,
+        contact: Contact | dict[str, str],
         nameservers: builtins.list[str] | None = None,
         whois_protection: bool = True,
-        auto_renew: bool = False,
     ) -> dict[str, Any]:
         """
-        Register a new domain.
+        Register a new domain. Charges the account balance.
 
         Args:
             domain: Domain name to register
             years: Number of years to register (default: 1)
-            contact: Contact information (uses account default if not provided)
+            contact: Registrant contact information (applied to all four
+                contact roles). A Contact model or a dict of API field
+                names (FirstName, LastName, ...)
             nameservers: List of nameservers (uses Namecheap defaults if not provided)
             whois_protection: Enable WhoisGuard protection (default: True)
-            auto_renew: Enable auto-renewal (default: False)
 
         Returns:
             Registration result with transaction details
@@ -152,21 +279,21 @@ class DomainsAPI(BaseAPI):
             ... )
         """
         params = {
-            "DomainName": domain,
+            "DomainName": to_punycode(domain),
             "Years": years,
             "AddFreeWhoisguard": "yes" if whois_protection else "no",
             "WGEnabled": "yes" if whois_protection else "no",
         }
 
-        # Add contact info if provided
-        if contact:
-            contact_data = (
-                contact.model_dump() if isinstance(contact, Contact) else contact
-            )
-            # Add contact fields for all types (Registrant, Tech, Admin, AuxBilling)
-            for contact_type in ["Registrant", "Tech", "Admin", "AuxBilling"]:
-                for field, value in contact_data.items():
-                    params[f"{contact_type}{field}"] = value
+        contact_data = (
+            contact.model_dump(by_alias=True, exclude_none=True)
+            if isinstance(contact, Contact)
+            else contact
+        )
+        # The API wants every contact role; mirror the registrant into all four
+        for contact_type in ["Registrant", "Tech", "Admin", "AuxBilling"]:
+            for field, value in contact_data.items():
+                params[f"{contact_type}{field}"] = value
 
         # Add nameservers if provided
         if nameservers:
@@ -227,17 +354,20 @@ class DomainsAPI(BaseAPI):
             ... )
         """
         # Extract TLD and SLD
-        parts = domain.split(".")
-        if len(parts) < 2:
+        ext = split_domain(to_punycode(domain))
+        if not ext.domain or not ext.suffix:
             raise ValueError(f"Invalid domain name: {domain}")
 
-        sld = parts[0]
-        tld = ".".join(parts[1:])
+        sld = ext.domain
+        tld = ext.suffix
 
         params = {"SLD": sld, "TLD": tld}
 
-        # Add contact fields
-        contact_data = contact.model_dump() if isinstance(contact, Contact) else contact
+        contact_data = (
+            contact.model_dump(by_alias=True, exclude_none=True)
+            if isinstance(contact, Contact)
+            else contact
+        )
         for contact_type in ["Registrant", "Tech", "Admin", "AuxBilling"]:
             for field, value in contact_data.items():
                 params[f"{contact_type}{field}"] = value
@@ -311,7 +441,7 @@ class DomainsAPI(BaseAPI):
             ...     [], reset=True
             ... )
         """
-        ext = tldextract.extract(domain)
+        ext = split_domain(to_punycode(domain))
         if not ext.domain or not ext.suffix:
             raise ValueError(f"Invalid domain name: {domain}")
 
@@ -320,9 +450,7 @@ class DomainsAPI(BaseAPI):
             command = "namecheap.domains.dns.setDefault"
         else:
             if not nameservers:
-                raise ValueError(
-                    "At least one nameserver is required when reset=False"
-                )
+                raise ValueError("At least one nameserver is required when reset=False")
             if len(nameservers) > 5:
                 raise ValueError("Maximum 5 nameservers allowed")
             params = {
@@ -332,162 +460,42 @@ class DomainsAPI(BaseAPI):
             }
             command = "namecheap.domains.dns.setCustom"
 
-        result: Any = self._request(
-            command, params, path="DomainDNSSetCustomResult"
-        )
+        result: Any = self._request(command, params, path="DomainDNSSetCustomResult")
         assert isinstance(result, dict)
         return bool(result)
 
     def _get_pricing(
         self, domains: builtins.list[str]
     ) -> dict[str, dict[str, Decimal | None]]:
+        """Get 1-year registration pricing for a list of domains.
+
+        Groups by TLD, fetches pricing via users.get_pricing(), and maps
+        back to individual domain names.
         """
-        Get pricing information for domains.
+        pricing: dict[str, dict[str, Decimal | None]] = {}
 
-        Args:
-            domains: List of domain names
-
-        Returns:
-            Dict mapping domain to pricing info
-        """
-        pricing = {}
-        logger.debug(f"Getting pricing for domains: {domains}")
-
-        # Group domains by TLD for efficient API calls
+        # Group domains by TLD
         tld_groups: dict[str, builtins.list[str]] = {}
         for domain in domains:
-            ext = tldextract.extract(domain)
-            tld = ext.suffix
+            tld = split_domain(to_punycode(domain)).suffix
             if tld not in tld_groups:
                 tld_groups[tld] = []
             tld_groups[tld].append(domain)
 
-        logger.debug(f"TLD groups: {tld_groups}")
-
-        # Fetch pricing for each TLD group
         for tld, domain_list in tld_groups.items():
-            try:
-                logger.debug(f"Fetching pricing for TLD: {tld}")
-                # Get pricing for this TLD
-                result: Any = self._request(
-                    "namecheap.users.getPricing",
-                    {
-                        "ProductType": "DOMAIN",
-                        "ActionName": "REGISTER",
-                        "ProductName": tld,
-                    },
-                    path="UserGetPricingResult.ProductType",
-                )
-                assert isinstance(result, dict)
-                logger.debug(f"Pricing API response for {tld}: {result}")
-                logger.debug(f"Response type: {type(result)}")
-                logger.debug(
-                    f"Response keys: "
-                    f"{list(result.keys()) if isinstance(result, dict) else 'Not a dict'}"
-                )
+            result = self.client.users.get_pricing(
+                "DOMAIN", action="REGISTER", product_name=tld
+            )
+            prices = result.get("REGISTER", {}).get(tld, [])
 
-                # Extract pricing info
-                if isinstance(result, dict):
-                    logger.debug(f"Parsing pricing response for {tld}")
-
-                    # Get ProductCategory (could be a list or single dict)
-                    categories = result.get("ProductCategory", {})
-                    if not isinstance(categories, list):
-                        categories = [categories] if categories else []
-
-                    logger.debug(f"Found {len(categories)} categories")
-
-                    # Look for REGISTER category
-                    for category in categories:
-                        if not isinstance(category, dict):
-                            continue
-
-                        # Use normalized name for consistent access
-                        category_name = category.get("@Name", "")
-                        category_name_normalized = category.get(
-                            "@Name_normalized", category_name.lower()
-                        )
-                        logger.debug(
-                            f"Checking category: {category_name} "
-                            f"(normalized: {category_name_normalized})"
-                        )
-
-                        if category_name_normalized == "register":
-                            # Get products in this category
-                            products = category.get("Product", {})
-                            if not isinstance(products, list):
-                                products = [products] if products else []
-
-                            logger.debug(
-                                f"Found {len(products)} products in REGISTER category"
-                            )
-
-                            # Find the product matching our TLD
-                            for product in products:
-                                if not isinstance(product, dict):
-                                    continue
-
-                                product_name = product.get("@Name", "")
-                                logger.debug(
-                                    f"Checking product: {product_name} vs {tld}"
-                                )
-
-                                if product_name.lower() == tld.lower():
-                                    # Get price list
-                                    price_info = product.get("Price", [])
-                                    if not isinstance(price_info, list):
-                                        price_info = [price_info] if price_info else []
-
-                                    logger.debug(
-                                        f"Found {len(price_info)} price entries for {tld}"
-                                    )
-
-                                    # Find 1 year price
-                                    for price in price_info:
-                                        if not isinstance(price, dict):
-                                            continue
-
-                                        duration = price.get("@Duration", "")
-                                        if duration == "1":
-                                            regular_price = price.get("@RegularPrice")
-                                            your_price = price.get("@YourPrice")
-                                            retail_price = price.get("@RetailPrice")
-
-                                            # Get additional cost
-                                            # (normalization handles their typo)
-                                            price.get("@YourAdditionalCost", "0")
-
-                                            logger.debug(
-                                                f"Found prices for {tld}: "
-                                                f"regular={regular_price}, "
-                                                f"your={your_price}, "
-                                                f"retail={retail_price}"
-                                            )
-
-                                            # Apply to all domains with this TLD
-                                            for domain in domain_list:
-                                                pricing[domain] = {
-                                                    "regular_price": Decimal(
-                                                        regular_price
-                                                    )
-                                                    if regular_price
-                                                    else None,
-                                                    "your_price": Decimal(your_price)
-                                                    if your_price
-                                                    else None,
-                                                    "retail_price": Decimal(
-                                                        retail_price
-                                                    )
-                                                    if retail_price
-                                                    else None,
-                                                }
-                                            break
-                                    break
-                            break
-
-            except Exception as e:
-                # If pricing fails, continue without it
-                logger.error(f"Failed to get pricing for TLD {tld}: {e}")
-                logger.debug("Full error:", exc_info=True)
+            for p in prices:
+                if p.duration == 1:
+                    for domain in domain_list:
+                        pricing[domain] = {
+                            "regular_price": p.regular_price,
+                            "your_price": p.your_price,
+                            "retail_price": None,
+                        }
+                    break
 
         return pricing

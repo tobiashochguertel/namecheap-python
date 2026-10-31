@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import pytest
+
+from namecheap.errors import NamecheapError
 from tests.utils.test_helpers import MockResponse
 
 
@@ -73,8 +75,7 @@ class TestSetNameserversIntegration:
 
         nc = Namecheap(**client_kwargs)
         result = nc.domains.set_nameservers(
-            "example.com",
-            ["ns1.cloudflare.com", "ns2.cloudflare.com"]
+            "example.com", ["ns1.cloudflare.com", "ns2.cloudflare.com"]
         )
 
         assert result is True
@@ -158,7 +159,7 @@ class TestSetNameserversIntegration:
         mock_client.return_value.get.return_value = mock_response
 
         nc = Namecheap(**client_kwargs)
-        with pytest.raises(Exception):
+        with pytest.raises(NamecheapError):
             nc.domains.set_nameservers("example.com", ["ns1.cloudflare.com"])
 
     def test_includes_auth_params(self, mocker, client_kwargs):

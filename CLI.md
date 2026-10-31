@@ -1,452 +1,320 @@
-# Namecheap CLI
+# namecheap-cli
 
-A comprehensive command-line interface for managing Namecheap domains and DNS records.
+Manage Namecheap domains, DNS, email forwarding, and domain privacy from the terminal.
 
-## Installation
+This document is the canonical guide for humans and agents alike: `namecheap-cli skill install` packages it verbatim as a [Claude Code skill](#claude-code-integration). The full per-command flag reference is generated from the CLI itself in [COMMANDS.md](src/namecheap_cli/COMMANDS.md).
 
-```bash
-pip install namecheap
-```
-
-Or install from source:
+## Install
 
 ```bash
-git clone https://github.com/adriangalilea/namecheap-python.git
-cd namecheap-python
-pip install -e .
+# Run without installing
+uvx --from 'namecheap-python[cli]' namecheap-cli domain list
+
+# Or install permanently
+uv tool install --python 3.12 'namecheap-python[cli]'
 ```
 
-## Quick Start
+## Setup
 
-### 1. Initialize Configuration
+Credentials resolve in this order: config file profile, then `NAMECHEAP_*` environment variables. The CLI also loads `.env` from the current working directory, so `cd ~/project && namecheap-cli ...` Just Works.
 
 ```bash
-nc config init
+namecheap-cli config init
 ```
 
-This will create `~/.namecheap/config.yaml` with your API credentials.
-
-### 2. Basic Commands
-
-```bash
-# List all domains
-nc domain list
-
-# Check domain availability
-nc domain check example.com --pricing
-
-# List DNS records
-nc dns list example.com
-
-# Add DNS record
-nc dns add example.com A www 192.0.2.1
-```
-
-## Command Structure
-
-```
-nc [global-options] <resource> <action> [options] [arguments]
-```
-
-### Resources
-
-- `domain` - Domain management
-- `dns` - DNS record management
-- `account` - Account operations
-- `config` - CLI configuration
-- `completion` - Shell completion
-
-### Global Options
-
-- `--config PATH` - Use alternate config file
-- `--profile NAME` - Use specific profile
-- `--sandbox` - Use sandbox API
-- `--output FORMAT` - Output format (table, json, yaml, csv)
-- `--quiet` - Minimal output
-- `--verbose` - Verbose output
-
-## Domain Management
-
-### List Domains
-
-```bash
-# List all domains
-nc domain list
-
-# List domains expiring soon
-nc domain list --expiring-in 60
-
-# List only active domains
-nc domain list --status active
-
-# Output as JSON
-nc domain list --output json
-```
-
-### Check Domain Availability
-
-```bash
-# Check single domain
-nc domain check example.com
-
-# Check multiple domains
-nc domain check example.com coolstartup.io myproject.dev
-
-# Include pricing information
-nc domain check example.com --pricing
-
-# Check from file
-nc domain check --file domains.txt
-```
-
-### Domain Information
-
-```bash
-nc domain info example.com
-```
-
-## DNS Management
-
-### List DNS Records
-
-```bash
-# List all records
-nc dns list example.com
-
-# Filter by type
-nc dns list example.com --type A
-
-# Filter by name
-nc dns list example.com --name www
-
-# Output as JSON
-nc dns list example.com --output json
-```
-
-### Add DNS Records
-
-```bash
-# Add A record
-nc dns add example.com A www 192.0.2.1
-
-# Add AAAA record
-nc dns add example.com AAAA www 2001:db8::1
-
-# Add CNAME record
-nc dns add example.com CNAME blog www.example.com
-
-# Add MX record with priority
-nc dns add example.com MX @ mail.example.com --priority 10
-
-# Add TXT record
-nc dns add example.com TXT @ "v=spf1 include:_spf.google.com ~all"
-
-# Add URL redirect
-nc dns add example.com URL301 www https://newsite.com
-
-# Custom TTL
-nc dns add example.com A www 192.0.2.1 --ttl 300
-```
-
-### Delete DNS Records
-
-```bash
-# Delete by type and name
-nc dns delete example.com --type A --name www
-
-# Delete by value
-nc dns delete example.com --value "old-verification-string"
-
-# Delete all records (with confirmation)
-nc dns delete example.com --all
-
-# Skip confirmation
-nc dns delete example.com --type TXT --yes
-```
-
-### Export/Import DNS Records
-
-```bash
-# Export as YAML (default)
-nc dns export example.com
-
-# Export as BIND zone file
-nc dns export example.com --format bind > example.com.zone
-
-# Export as JSON
-nc dns export example.com --format json > dns-records.json
-
-# Import from file (not yet implemented)
-nc dns import example.com --file dns-records.yaml
-```
-
-## Configuration
-
-### Configuration File
-
-Location: `~/.namecheap/config.yaml`
+The wizard walks you through API key, username, and sandbox mode (answer `y` only for a sandbox.namecheap.com account: its key is not your real account's). Config lives at `$XDG_CONFIG_HOME/namecheap/config.yaml` (`~/.config/namecheap/config.yaml` by default; `%APPDATA%\namecheap\config.yaml` on Windows):
 
 ```yaml
-default_profile: personal
+default_profile: default
 
 profiles:
-  personal:
+  default:
     api_key: your-api-key
     username: your-username
     api_user: your-username
     sandbox: false
-    
-  business:
-    api_key: business-api-key
-    username: business-username
-    api_user: business-username
-    sandbox: false
-
-defaults:
-  output: table
-  color: true
-  auto_renew: true
-  whois_privacy: true
-  dns_ttl: 1800
 ```
 
-### Environment Variables
+Or use environment variables: `NAMECHEAP_API_KEY`, `NAMECHEAP_USERNAME`, `NAMECHEAP_API_USER` (defaults to username), `NAMECHEAP_CLIENT_IP` (auto-detected), `NAMECHEAP_SANDBOX` (`true` for the sandbox; unset means production; anything that is not a clear yes/no is an error). Every API error names the API that answered: `(production API)` or `(sandbox API)`.
 
-You can also use environment variables:
-
-- `NAMECHEAP_API_KEY`
-- `NAMECHEAP_USERNAME`
-- `NAMECHEAP_API_USER`
-- `NAMECHEAP_CLIENT_IP`
-- `NAMECHEAP_SANDBOX`
-
-### Using Profiles
+Verify access before anything else:
 
 ```bash
-# Use default profile
-nc domain list
+❯ namecheap-cli domain list
 
-# Use specific profile
-nc --profile business domain list
+                    Domains (4 total)
+┏━━━━━━━━━━━━━━━━━━━┳━━━━━━━━┳━━━━━━━━━━━━┳━━━━━━━━━━━━┳━━━━━━━━┓
+┃ Domain            ┃ Status ┃ Expires    ┃ Auto-Renew ┃ Locked ┃
+┡━━━━━━━━━━━━━━━━━━━╇━━━━━━━━╇━━━━━━━━━━━━╇━━━━━━━━━━━━╇━━━━━━━━┩
+│ example.com       │ Active │ 2025-10-21 │ ✓          │        │
+│ coolsite.io       │ Active │ 2026-05-25 │ ✓          │        │
+│ myproject.dev     │ Active │ 2026-05-30 │ ✓          │        │
+│ awesome.site      │ Active │ 2026-03-20 │ ✓          │        │
+└───────────────────┴────────┴────────────┴────────────┴────────┘
 ```
 
-## Output Formats
+The Namecheap API requires a whitelisted client IP. An IP-rejection error means your current public IP is not whitelisted (Namecheap → Profile → Tools → API Access), not that the key is wrong. If your IP rotates, route through a static-IP box: `ALL_PROXY=socks5://127.0.0.1:1080 namecheap-cli domain list`. SOCKS needs the socks extra (`namecheap-python[cli,socks]`); HTTP proxies via `HTTPS_PROXY` need nothing extra. See the [main README](README.md#static-ip-via-proxy).
 
-### Table (Default)
+## Command structure
+
+```
+namecheap-cli [GLOBAL OPTIONS] <resource> <action> [ARGS] [OPTIONS]
+```
+
+Global options go **before** the resource: `namecheap-cli -o json dns list example.com` works, `namecheap-cli dns list example.com -o json` is an error.
+
+| Global option | Effect |
+|---|---|
+| `-o, --output table\|json\|yaml\|csv` | Output format |
+| `--profile NAME` | Config profile |
+| `--config PATH` | Alternate config file |
+| `--sandbox` / `--production` | Force the sandbox API (a separate account with its own key) or production. Neither: the profile's `sandbox`, else `NAMECHEAP_SANDBOX`, else production |
+| `-q, --quiet` / `-v, --verbose` | Less / more output |
+| `--no-color` | Disable colored output |
+| `--debug` | Full traceback on unexpected errors |
+
+Resources: `domain` (list, check, register, info, contacts, tlds), `dns` (list, add, delete, export, nameservers, set-nameservers, reset-nameservers, email-forwarding, set-email-forwarding, clear-email-forwarding), `for-sale` (show, set, clear), `privacy` (list, enable, disable, renew, change-email), `account` (balance, pricing), `config`, `completion`, `skill`. Every flag and argument: [COMMANDS.md](src/namecheap_cli/COMMANDS.md) or `namecheap-cli <resource> --help`.
+
+The CLI operates only on domains in your Namecheap account, plus three exceptions: `domain check` reports whether arbitrary domains are unregistered, and for taken ones whether the holder advertises them for sale in DNS (RFC 10023; there is no WHOIS or marketplace API, so a seller who publishes no record stays invisible); `for-sale show` reads any domain's `_for-sale` records; and `domain register` buys one:
 
 ```bash
-nc domain list
+❯ namecheap-cli domain check myawesome.com coolstartup.live
+                     Domain Availability
+┏━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━┳━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━┓
+┃ Domain           ┃ Available    ┃ 1st Year ┃ Regular (USD/yr) ┃
+┡━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━╇━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━┩
+│ myawesome.com    │ ❌ Taken     │ -        │ -                │
+│ coolstartup.live │ ✅ Available │ $2.98    │ $34.48           │
+└──────────────────┴──────────────┴──────────┴──────────────────┘
 ```
 
-```
-Domains (3 total)
-┏━━━━━━━━━━━━━━━━━┳━━━━━━━━┳━━━━━━━━━━━━┳━━━━━━━━━━━┳━━━━━━━━┓
-┃ Domain          ┃ Status ┃ Expires    ┃ Auto-Renew┃ Locked ┃
-┡━━━━━━━━━━━━━━━━━╇━━━━━━━━╇━━━━━━━━━━━━╇━━━━━━━━━━━╇━━━━━━━━┩
-│ example.com     │ Active │ 2024-12-31 │ ✓         │ 🔒     │
-│ coolstartup.io  │ Active │ 2025-06-15 │ ✓         │        │
-│ myproject.dev   │ Active │ 2024-08-20 │ ✗         │ 🔒     │
-└─────────────────┴────────┴────────────┴───────────┴────────┘
-```
+"1st Year" is the price actually charged at registration (promo pricing plus any ICANN fee); "Regular" is what the TLD normally costs per year — a big gap means the renewal will not look like the first invoice.
 
-### JSON
+## Safety rules
+
+These matter equally for humans scripting the CLI and for agents driving it:
+
+- **Every DNS write replaces the whole zone.** `dns add` and `dns delete` are read-modify-write over all records (Namecheap has no per-record API). Snapshot before bulk or risky changes: `namecheap-cli dns export example.com --format json > example.com.dns.json`. Never run two DNS writes against the same domain concurrently.
+- **Confirmation prompts and `--yes`.** `dns delete`, `dns set-nameservers`, `dns reset-nameservers`, `dns set-email-forwarding`, `dns clear-email-forwarding`, `privacy disable`, and `privacy renew` prompt interactively. In non-interactive shells (scripts, agents) the prompt cannot be answered and the command dies: pass `--yes`/`-y`, but only once the operation is actually intended. Agents: never pass `--yes` without explicit user approval of that specific operation.
+- `dns set-email-forwarding` **replaces all existing rules**. Read current rules first (`dns email-forwarding example.com`) and re-include the keepers. It, and `dns clear-email-forwarding`, print the rules being replaced to stderr (`<domain> forwarding before: mailbox:target ...`) even with `--yes`: that line is what to restore from.
+- **`domain register` spends real money** from the account balance. It always shows first-year price, regular price, renewal rate, and balance, then asks; only `--yes` skips the confirmation (`--quiet` does not). Agents: never pass `--yes` unless the user has approved registering that specific domain at that price. Registrations are effectively non-refundable.
+- `privacy renew` charges real money from the account balance.
+- `dns delete --all` wipes the zone. Prefer targeted deletes by `--type`/`--name`/`--value`.
+
+## Quirks
+
+- The amount actually charged at registration can exceed the shown total by the ICANN fee (~$0.20/yr): Namecheap sometimes reports `IcannFee=0` in the availability check and then charges it anyway. The success output shows the real charged amount.
+- TTL `1799` (the default) displays as "Automatic" in the Namecheap web UI; `1800` displays as "30 min". Undocumented Namecheap behavior.
+- MX records require `--priority`.
+- IDN and emoji domains work directly (`🧊.to`, `café.com`) and print back in readable form. `-o json` carries both: `domain` is the punycode the registry stores (pass this to `dig`), `unicode` is the display form. `domain check` shows `🧊.to (xn--3u9h.to)` because that is the one command taking arbitrary input, where a homograph (`аpple.com` with a Cyrillic `а`) is worth seeing.
+- **Per-domain lookups do not scale.** Namecheap allows ~20 requests/minute, and `domain list` returns no nameserver or DNS-provider field, so "which of my domains are on Namecheap DNS?" over 20 domains is a rate-limit error waiting to happen. Ask the DNS instead, it is free, parallel, and reports what actually resolves:
+
+  ```bash
+  for d in $(namecheap-cli -o json domain list | jq -r '.[].domain'); do
+    printf '%-20s %s\n' "$d" "$(dig +short NS "$d" | paste -sd, -)"
+  done
+  ```
+
+  `dns nameservers <domain>` is the API equivalent for a single domain.
+- DNS records are only served (and editable here) while the domain uses Namecheap BasicDNS. If `dns nameservers example.com` shows custom nameservers, the records live at that provider (e.g. Cloudflare), not here. Email forwarding likewise requires Namecheap DNS.
+- Nameserver changes can take up to 48 hours to propagate.
+
+## Workflows
+
+Verify DNS changes afterwards with `dig +short <name> <TYPE>` (allow a few minutes for propagation).
+
+### Register a domain
 
 ```bash
-nc domain list --output json
+❯ namecheap-cli domain register videoclub.live --contacts-from self.fm
+
+Registering videoclub.live
+
+Years: 1
+Price: $2.98 first year (regular $34.48/yr)
+Renews at: $39.48/yr
+Total: $2.98
+Privacy: ✓ free WhoisGuard
+Contact: Adrian Galilea <adriangalilea@gmail.com> (from self.fm)
+Balance: 68.98 USD available
+
+Register videoclub.live for $2.98? [y/n] (n): y
+✅ Registered videoclub.live!
+  Charged: $3.1800
+  Order ID: 210521326
 ```
 
-```json
-[
-  {
-    "domain": "example.com",
-    "status": "active",
-    "expires": "2024-12-31T00:00:00",
-    "auto_renew": true,
-    "locked": true
-  }
-]
-```
+`--contacts-from` copies the registrant contact from a domain already in the account (the usual case); without it the CLI prompts for each contact field, and in a non-interactive shell it exits asking for the flag. `--years N` for multi-year, `-n ns1 -n ns2` for custom nameservers from birth, `--no-privacy` to skip WhoisGuard. Auto-renew has no API switch — enable it in the Namecheap dashboard afterwards if wanted.
 
-### CSV
+### GitHub Pages
 
 ```bash
-nc domain list --output csv
+namecheap-cli dns export example.com --format json > example.com.dns.json
+namecheap-cli dns add example.com A @ 185.199.108.153
+namecheap-cli dns add example.com A @ 185.199.109.153
+namecheap-cli dns add example.com A @ 185.199.110.153
+namecheap-cli dns add example.com A @ 185.199.111.153
+namecheap-cli dns add example.com CNAME www <user>.github.io
 ```
-
-```csv
-domain,status,expires,auto_renew,locked
-example.com,active,2024-12-31T00:00:00,true,true
-```
-
-### YAML
 
 ```bash
-nc domain list --output yaml
+❯ namecheap-cli dns list example.com
+
+                       DNS Records for example.com (7 total)
+┏━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━┳━━━━━━━━━━┓
+┃ Type     ┃ Name                 ┃ Value                      ┃ TTL    ┃ Priority ┃
+┡━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━╇━━━━━━━━━━┩
+│ A        │ @                    │ 185.199.108.153            │ 1799   │ 10       │
+│ A        │ @                    │ 185.199.109.153            │ 1799   │ 10       │
+│ A        │ @                    │ 185.199.110.153            │ 1799   │ 10       │
+│ A        │ @                    │ 185.199.111.153            │ 1799   │ 10       │
+│ CNAME    │ www                  │ parkingpage.namecheap.com. │ 1800   │ 10       │
+│ CNAME    │ www                  │ user.github.io.            │ 1799   │ 10       │
+│ URL      │ @                    │ http://www.example.com/    │ 1800   │ 10       │
+└──────────┴──────────────────────┴────────────────────────────┴────────┴──────────┘
 ```
 
-```yaml
-- domain: example.com
-  status: active
-  expires: '2024-12-31T00:00:00'
-  auto_renew: true
-  locked: true
-```
-
-## Shell Completion
-
-### Install Completion
+Then remove leftover parking records (`CNAME www → parkingpage.namecheap.com.` and the `URL @` redirect):
 
 ```bash
-# Bash
-nc completion bash >> ~/.bashrc
-
-# Zsh
-nc completion zsh >> ~/.zshrc
-
-# Fish
-nc completion fish > ~/.config/fish/completions/nc.fish
+namecheap-cli dns delete example.com --type CNAME --name www --value parkingpage.namecheap.com.
+namecheap-cli dns delete example.com --type URL
 ```
 
-### Usage
+### Vercel and other hosts
+
+Same pattern, but fetch the currently recommended records from the host's own docs or dashboard before writing anything. Do not trust remembered IPs.
+
+### Move DNS to Cloudflare (or any external DNS)
 
 ```bash
-nc domain <TAB>
-check    info     list     lock     register renew    unlock
+# 1. Export existing records to re-create at the new provider
+namecheap-cli dns export example.com --format bind
 
-nc dns add example.com <TAB>
-A        AAAA     CNAME    MX       NS       TXT      URL
+# 2. Get the assigned nameservers from the new provider's dashboard, then:
+namecheap-cli dns set-nameservers example.com anna.ns.cloudflare.com curt.ns.cloudflare.com
+
+# Back to Namecheap BasicDNS later, if ever:
+namecheap-cli dns reset-nameservers example.com
 ```
 
-## Advanced Usage
+### Advertise a domain as for sale (`_for-sale`)
 
-### Scripting
+[RFC 10023](https://www.rfc-editor.org/rfc/rfc10023.html) reserves the `_for-sale` underscored node name ([IANA registry](https://www.iana.org/assignments/dns-parameters/dns-parameters.xhtml#underscored-globally-scoped-dns-node-names)) so a live domain can signal it is for sale without a parking page or any visible change to the site. Brokers and availability services find it by lookup; browsers never see it. Summary at the [Website Specification](https://specification.website/spec/foundations/for-sale-dns/).
 
 ```bash
-# Find domains expiring soon
-nc domain list --expiring-in 30 --output json | \
-  jq -r '.[] | .domain'
+namecheap-cli for-sale set example.com --furi mailto:sales@example.com
+```
 
-# Bulk check domains
-for domain in site1.com site2.com site3.com; do
-  nc dns add $domain A @ 192.0.2.1
+`for-sale set` writes the RRset the RFC asks for and refuses anything else, so the rules below are enforced, not just advice:
+
+- `v=FORSALE1;` is mandatory, case-sensitive, and must start the string.
+- **One tag-value pair per record.** Each `--furi`/`--fval`/`--ftxt`/`--fcod` (all repeatable) becomes its own record at the same name.
+- Tags: `furi=` (contact URI, `https`/`mailto`/`tel`), `ftxt=` (human text), `fval=` (asking price as currency code plus amount, `fval=USD12500`), `fcod=` (private code between cooperating parties).
+- Max 255 octets, single character-string, no continuation.
+- TTL must be ≤ 3600 (`--ttl`, default 1799).
+- **Withdraw once the domain is no longer for sale** (`for-sale clear`). Absence is the only "not for sale" signal; there is no negative value.
+
+`set` replaces every `_for-sale` record of the domain and nothing else; it and `clear` print the records they replace to stderr first (`<domain> _for-sale before: ...`).
+
+```bash
+# Price and contact together: two records, same name
+namecheap-cli for-sale set example.com --fval USD12500 --furi https://example.com/for-sale
+
+# Verify (DNS, so allow for the TTL): any domain, yours or not
+namecheap-cli for-sale show example.com
+
+# Withdraw
+namecheap-cli for-sale clear example.com
+```
+
+`domain list` shows the state of all your domains in a "For Sale" column, and `domain check` shows it for every taken domain it checks. Prices carry a `*` and a note that they are indicative only, as RFC 10023 §4 asks.
+
+Writing only works while the domain uses Namecheap BasicDNS. On Cloudflare or another provider, add the same TXT records there; `for-sale show` still reads them. Publishing `fval` puts your asking price in a machine-harvestable field and anchors every negotiation that follows, so `furi` alone is the usual choice.
+
+### Email forwarding
+
+```bash
+❯ namecheap-cli dns email-forwarding example.com
+      Email Forwarding for example.com
+┏━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━┓
+┃ Mailbox          ┃ Forwards To    ┃
+┡━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━┩
+│ info@example.com │ me@gmail.com   │
+└──────────────────┴────────────────┘
+
+❯ namecheap-cli dns set-email-forwarding example.com info:me@gmail.com support:help@gmail.com
+example.com forwarding before: info:me@gmail.com
+
+# Remove every rule (prints the ones it removes to stderr first)
+❯ namecheap-cli dns clear-email-forwarding example.com
+```
+
+### Account balance
+
+```bash
+❯ namecheap-cli account balance
+          Account Balance
+┏━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━┓
+┃ Field               ┃    Amount ┃
+┡━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━┩
+│ Available Balance   │  0.00 USD │
+│ Account Balance     │  0.00 USD │
+│ Earned Amount       │  0.00 USD │
+│ Withdrawable        │  0.00 USD │
+│ Auto-Renew Required │ 20.16 USD │
+└─────────────────────┴───────────┘
+```
+
+## Scripting
+
+Always parse `-o json`; table output truncates values longer than 50 characters and mixes in emoji.
+
+```bash
+# Domains expiring within 30 days
+namecheap-cli -o json domain list --expiring-in 30 | jq -r '.[].domain'
+
+# Domains without auto-renew
+namecheap-cli -o json domain list | jq -r '.[] | select(.auto_renew == false) | .domain'
+
+# Only the A records
+namecheap-cli -o json dns list example.com | jq '.[] | select(.type == "A")'
+
+# Back up every zone
+for domain in $(namecheap-cli -o json domain list | jq -r '.[].domain'); do
+  namecheap-cli dns export "$domain" --format bind > "zones/${domain}.zone"
 done
 
-# Export all DNS records
-for domain in $(nc domain list --output json | jq -r '.[].domain'); do
-  nc dns export $domain --format bind > zones/${domain}.zone
-done
+# Bulk availability check
+namecheap-cli domain check --file domains.txt
 ```
 
-### Filtering with jq
+Exit codes: `0` success, `1` error, `130` interrupted.
+
+## Shell completion
 
 ```bash
-# Get only A records
-nc dns list example.com --output json | \
-  jq '.[] | select(.type == "A")'
-
-# Get domains without auto-renew
-nc domain list --output json | \
-  jq '.[] | select(.auto_renew == false) | .domain'
+namecheap-cli completion bash >> ~/.bashrc
+namecheap-cli completion zsh >> ~/.zshrc
+namecheap-cli completion fish > ~/.config/fish/completions/namecheap-cli.fish
 ```
 
-### Batch Operations
+## Claude Code integration
 
 ```bash
-# Check domains from file
-cat > domains.txt << EOF
-coolname.com
-awesomeproject.io
-mycompany.dev
-EOF
-
-nc domain check --file domains.txt --pricing
+namecheap-cli skill install
 ```
 
-## Error Handling
-
-The CLI provides clear error messages:
-
-```bash
-$ nc domain register taken-domain.com
-❌ Error: taken-domain.com is not available for registration
-
-💡 Suggestions:
-  • taken-domain.net is available for $12.98/year
-  • taken-domain.io is available for $32.88/year
-  • mytaken-domain.com is available for $12.98/year
-```
-
-## Exit Codes
-
-- `0` - Success
-- `1` - General error
-- `130` - Interrupted (Ctrl+C)
-
-## Tips
-
-1. **Use aliases**: Add to your shell config:
-   ```bash
-   alias ncd='nc domain'
-   alias ncdns='nc dns'
-   ```
-
-2. **Default output**: Set in config for your preference:
-   ```yaml
-   defaults:
-     output: json  # Always output JSON
-   ```
-
-3. **Quick domain check**: 
-   ```bash
-   nc domain check example.com --pricing | grep "✅"
-   ```
-
-4. **Safe deletion**: Always use `--type` or `--name` to avoid accidents:
-   ```bash
-   nc dns delete example.com --type TXT --value "old-record"
-   ```
-
-5. **Dry run**: Use `--output json` to preview changes:
-   ```bash
-   nc dns list example.com --output json > before.json
-   # Make changes
-   nc dns list example.com --output json > after.json
-   diff before.json after.json
-   ```
+Writes this document, wrapped as a skill, to `~/.claude/skills/namecheap-cli/`, plus a command reference generated live from the installed CLI so it always matches your exact version. Re-run after upgrading. From then on, "set up example.com for GitHub Pages" in Claude Code handles DNS without leaving the conversation.
 
 ## Troubleshooting
 
-### API Key Issues
-
 ```bash
-# Check if API key is set
-echo $NAMECHEAP_API_KEY
+# Full traceback on unexpected errors
+namecheap-cli --debug domain list
 
-# Test with sandbox
-nc --sandbox domain list
-
-# Use verbose mode
-nc --verbose domain list
+# Test against the sandbox API
+namecheap-cli --sandbox domain list
 ```
 
-### Permission Denied
-
-```bash
-# Fix config file permissions
-chmod 600 ~/.namecheap/config.yaml
-```
-
-### Debug Mode
-
-```bash
-# Show full traceback on errors
-nc --debug domain list
-```
-
-## Contributing
-
-See the main project README for contribution guidelines.
-
-## License
-
-MIT
+Configuration errors print their own remediation (missing key, unknown profile). API errors include Namecheap's message plus a hint when one is known.
